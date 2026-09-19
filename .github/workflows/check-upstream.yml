@@ -98,15 +98,12 @@ jobs:
 
           # 创建 Release（tag = 上游版本号）
           fpk_file=$(ls wildwork-*.fpk | head -1)
+          body=$(printf '{"tag_name":"%s","name":"Wild Work FPK %s","body":"自动构建于上游 %s (rockswang/wild-work releases)。下载 wildwork-*.fpk 在飞牛 fnOS 应用中心手动安装。","draft":false,"prerelease":false}' "$tag" "$tag" "$tag")
           curl -sf -X POST \
             "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases" \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github+json" \
-            -d "$(jq -n --arg tag "$tag" \
-              '{tag_name:$tag, name:("Wild Work FPK "+$tag), \
-                body:("自动构建于上游 ["+$tag+"](https://github.com/rockswang/wild-work/releases/tag/"+$tag+")。\
-                下载 wildwork-*.fpk 在飞牛 fnOS 应用中心手动安装。"), draft:false, prerelease:false}')" \
-            | jq -r '.html_url' || echo "Release may already exist"
+            -d "$body" | jq -r '.html_url' || echo "Release may already exist"
 
           rel_id=$(curl -sf \
             "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" \
