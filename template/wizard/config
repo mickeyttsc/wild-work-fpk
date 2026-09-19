@@ -1,0 +1,26 @@
+[
+  {
+    "stepTitle": "Wild Work 是什么",
+    "items": [
+      { "type": "tips", "helpText": "Wild Work 是 TraeWork / WorkBuddy / Qoder 账号池代理：把多个 IDE 账号汇成一个 OpenAI 兼容接口，供 ChatBox、NextChat、沉浸式翻译等客户端使用。" },
+      { "type": "tips", "helpText": "接口地址：http://NAS的IP:7863/v1 。控制台首页『OpenAI接口』处会显示实际地址，点击即可复制。" }
+    ]
+  },
+  {
+    "stepTitle": "多账号与自动切换",
+    "items": [
+      { "type": "tips", "helpText": "＋WorkBuddy / ＋TraeWork / ＋Qoder 三个按钮每种都能加多个号，混着加也行，全部进入同一个账号池。" },
+      { "type": "tips", "helpText": "自动切换：某个号被限流或连续出错时，自动进入冷却并切到下一个健康账号；全部账号都不可用时才提示 no_healthy_account。" },
+      { "type": "tips", "helpText": "积分快用完的号建议点『停用』雪藏（不参与轮换），积分刷新后再『启用』；『刷新积分』『全部签到』支持一键批量。" },
+      { "type": "tips", "helpText": "添加账号：点＋按钮 → 浏览器完成 IDE 登录 → 复制打不开的 127.0.0.1 地址 → 桌面『Wild Work 登录补投』粘贴并确认。" }
+    ]
+  },
+  {
+    "stepTitle": "桌面图标与访问方式",
+    "items": [
+      { "type": "tips", "helpText": "『Wild Work』主入口：走统一网关，局域网和飞牛远程都能打开，接口地址显示为 NAS 局域网 IP。" },
+      { "type": "tips", "helpText": "『Wild Work 直连』：仅局域网可用，是网关异常时的备用入口。" },
+      { "type": "tips", "helpText": "『Wild Work 登录补投』：添加账号时粘贴 127.0.0.1 回调地址专用页。" }
+    ]
+  }
+]

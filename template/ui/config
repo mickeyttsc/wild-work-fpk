@@ -1,0 +1,30 @@
+{
+  ".url": {
+    "wildwork.main": {
+      "title": "Wild Work",
+      "icon": "images/icon_{0}.png",
+      "type": "iframe",
+      "protocol": "",
+      "gatewayPrefix": "/app/wildwork",
+      "gatewaySocket": "app.sock",
+      "url": "/app/wildwork",
+      "allUsers": true
+    },
+    "wildwork.direct": {
+      "title": "Wild Work 直连",
+      "icon": "images/icon_{0}.png",
+      "type": "iframe",
+      "protocol": "http",
+      "port": "7863",
+      "url": "/",
+      "allUsers": true
+    },
+    "wildwork.submit": {
+      "title": "Wild Work 登录补投",
+      "icon": "images/icon_{0}.png",
+      "type": "iframe",
+      "url": "/cgi/ThirdParty/wildwork/index.cgi/",
+      "allUsers": true
+    }
+  }
+}

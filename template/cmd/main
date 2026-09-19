@@ -1,0 +1,127 @@
+#!/bin/bash
+# wild-work fnOS service control script
+# v2.0.4: 统一绑 0.0.0.0（局域网/VPN 多通路）+ 统一网关 socket 桥接
+
+APP_BIN="$TRIM_APPDEST/bin/wild-work"
+BRIDGE_BIN="$TRIM_APPDEST/bin/wwbridge"
+SOCK_FILE="$TRIM_APPDEST/app.sock"
+PID_FILE="$TRIM_PKGVAR/wild-work.pid"
+BRIDGE_PID_FILE="$TRIM_PKGVAR/wwbridge.pid"
+LOG_FILE="$TRIM_PKGVAR/wild-work.log"
+PORT="${TRIM_SERVICE_PORT:-7863}"
+GATEWAY_PREFIX="/app/wildwork"
+
+is_running() {
+    if [ -f "$PID_FILE" ]; then
+        pid=$(cat "$PID_FILE" 2>/dev/null)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# v2.0.4: 统一绑 0.0.0.0（局域网 / VPN / 本机网关桥接 多通路都能连）
+patch_cfg() {
+    cfg="$1"
+    if [ ! -f "$cfg" ]; then
+        printf '{\n  "listen_host": "0.0.0.0",\n  "listen_port": %s\n}\n' "$PORT" > "$cfg" 2>/dev/null || return 0
+        return 0
+    fi
+    if grep -q '"listen_host"' "$cfg" 2>/dev/null; then
+        sed -i 's/"listen_host"[[:space:]]*:[[:space:]]*"[^"]*"/"listen_host": "0.0.0.0"/' "$cfg" 2>/dev/null || true
+    else
+        sed -i '0,/{/s//{\n  "listen_host": "0.0.0.0",/' "$cfg" 2>/dev/null || true
+    fi
+    if grep -q '"listen_port"' "$cfg" 2>/dev/null; then
+        sed -i "s/\"listen_port\"[[:space:]]*:[[:space:]]*[0-9][0-9]*/\"listen_port\": $PORT/" "$cfg" 2>/dev/null || true
+        sed -i "s/\"listen_port\"[[:space:]]*:[[:space:]]*\"[0-9]*\"/\"listen_port\": $PORT/" "$cfg" 2>/dev/null || true
+    else
+        sed -i "0,/{/s//{\\n  \"listen_port\": $PORT,/" "$cfg" 2>/dev/null || true
+    fi
+}
+
+# v2.0.8: 探测局域网 IP（仅供控制台"OpenAI接口"显示用，绑定仍为 0.0.0.0）
+detect_lan_ip() {
+    ip=$(ip -4 route get 1.1.1.1 2>/dev/null | grep -o 'src [0-9.]*' | awk '{print $2}')
+    case "$ip" in
+        192.168.*|10.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*) echo "$ip" ;;
+        *) echo "" ;;
+    esac
+}
+
+start_bridge() {
+    [ -x "$BRIDGE_BIN" ] || return 0
+    stop_bridge
+    LAN_IP=$(detect_lan_ip)
+    nohup "$BRIDGE_BIN" "$SOCK_FILE" "$GATEWAY_PREFIX" "127.0.0.1:$PORT" "$LAN_IP" >> "$LOG_FILE" 2>&1 &
+    echo $! > "$BRIDGE_PID_FILE"
+}
+
+stop_bridge() {
+    if [ -f "$BRIDGE_PID_FILE" ]; then
+        bpid=$(cat "$BRIDGE_PID_FILE" 2>/dev/null)
+        [ -n "$bpid" ] && kill "$bpid" 2>/dev/null
+        rm -f "$BRIDGE_PID_FILE"
+    fi
+    pkill -f "$BRIDGE_BIN" 2>/dev/null
+    rm -f "$SOCK_FILE" 2>/dev/null
+}
+
+case "$1" in
+    start)
+        if is_running; then
+            exit 0
+        fi
+        mkdir -p "$TRIM_PKGVAR" "$TRIM_PKGETC/auth" "$TRIM_PKGHOME" "$TRIM_PKGTMP"
+        patch_cfg "$TRIM_PKGVAR/config.json"
+        patch_cfg "$TRIM_PKGHOME/config.json"
+        cp -f "$TRIM_PKGVAR/config.json" "$TRIM_APPDEST/bin/config.json" 2>/dev/null || true
+        export WILDWORK_LISTEN="0.0.0.0:$PORT"
+        export WILDWORK_STATE_FILE="$TRIM_PKGVAR/state"
+        export WILDWORK_AUTH_DIR="$TRIM_PKGETC/auth"
+        export HOME="$TRIM_PKGHOME"
+        cd "$TRIM_PKGVAR" || exit 1
+        nohup "$APP_BIN" --no-tray >> "$LOG_FILE" 2>&1 &
+        echo $! > "$PID_FILE"
+        for i in 1 2 3 4 5; do
+            sleep 1
+            if ! is_running; then
+                echo "wild-work exited during startup, see $LOG_FILE" > "$TRIM_TEMP_LOGFILE" 2>/dev/null
+                exit 1
+            fi
+        done
+        start_bridge
+        exit 0
+        ;;
+    stop)
+        stop_bridge
+        if [ -f "$PID_FILE" ]; then
+            pid=$(cat "$PID_FILE" 2>/dev/null)
+            if [ -n "$pid" ]; then
+                kill "$pid" 2>/dev/null
+                for i in 1 2 3 4 5 6 7 8 9 10; do
+                    kill -0 "$pid" 2>/dev/null || break
+                    sleep 1
+                done
+                kill -9 "$pid" 2>/dev/null
+            fi
+            rm -f "$PID_FILE"
+        fi
+        pkill -f "$APP_BIN" 2>/dev/null
+        exit 0
+        ;;
+    status)
+        if is_running; then
+            exit 0
+        fi
+        if pgrep -f "$APP_BIN" > /dev/null 2>&1; then
+            exit 0
+        fi
+        exit 3
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|status}" > "$TRIM_TEMP_LOGFILE" 2>/dev/null
+        exit 1
+        ;;
+esac

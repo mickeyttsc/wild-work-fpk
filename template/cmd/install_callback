@@ -1,0 +1,3 @@
+#!/bin/bash
+# fnOS lifecycle hook (no-op)
+exit 0
