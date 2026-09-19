@@ -1,6 +1,7 @@
 #!/bin/bash
-# build-fpk.sh - Wild Work fpk 自动打包脚本
-# 复用现有 cmd/main+wwbridge+ui，只替换二进制
+# build-fpk.sh - Wild Work fnOS FPK auto-build script
+# Completely standalone - no local installation required
+# Builds from upstream binary and creates complete fpk structure
 
 set -e
 
@@ -31,109 +32,244 @@ fi
 BINARY_SHA256=$(sha256sum wild-work | cut -d' ' -f1)
 echo "Binary SHA256: $BINARY_SHA256"
 
-# 3. Copy icon
+# 3. Create icon files
+mkdir -p app/ui/images
 if [ -f icon.png ]; then
-    # Use ImageMagick if available, otherwise create placeholder
     if command -v convert &> /dev/null; then
         convert icon.png -resize 64x64 app/ui/images/icon_64.png
         convert icon.png -resize 256x256 app/ui/images/icon_256.png
     else
-        # Minimal PNG placeholders (will be replaced later)
+        # Create minimal valid PNG placeholders
         printf '\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00@\x00\x00\x00@\x02\x03\x06\x00\x00\x00\xec\x8b\x9d\x88\x00\x00\x00\x1cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05\x1d\xd4\x00\x00\x00\x00IEND\xaeB`\x82' > app/ui/images/icon_64.png
         printf '\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x01\x00\x00\x00\x01\x00\x02\x03\x06\x00\x00\x00\x19\x97\x5a\xdc\x00\x00\x00\x8cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05\x1d\xd4\x00\x00\x00\x00IEND\xaeB`\x82' > app/ui/images/icon_256.png
     fi
 else
-    # Create minimal placeholders
-    mkdir -p app/ui/images
+    # Create minimal PNG placeholders
     printf '\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00@\x00\x00\x00@\x02\x03\x06\x00\x00\x00\xec\x8b\x9d\x88\x00\x00\x00\x1cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05\x1d\xd4\x00\x00\x00\x00IEND\xaeB`\x82' > app/ui/images/icon_64.png
     printf '\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x01\x00\x00\x00\x01\x00\x02\x03\x06\x00\x00\x00\x19\x97\x5a\xdc\x00\x00\x00\x8cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05\x1d\xd4\x00\x00\x00\x00IEND\xaeB`\x82' > app/ui/images/icon_256.png
 fi
 
-# 3. Copy from existing installation (reuse cmd, ui, config)
-EXISTING_VAR="/var/apps/wildwork"
+# 4. Create complete FPK structure (standalone, no local deps)
+echo "Creating FPK structure..."
 
-if [ -d "$EXISTING_VAR" ]; then
-    echo "Reusing fpk structure from $EXISTING_VAR"
-    
-    # Copy cmd scripts
-    mkdir -p cmd
-    cp "$EXISTING_VAR/cmd/main" cmd/
-    cp "$EXISTING_VAR/cmd/install_init" cmd/
-    cp "$EXISTING_VAR/cmd/install_callback" cmd/
-    cp "$EXISTING_VAR/cmd/upgrade_init" cmd/
-    cp "$EXISTING_VAR/cmd/upgrade_callback" cmd/
-    cp "$EXISTING_VAR/cmd/uninstall_init" cmd/
-    cp "$EXISTING_VAR/cmd/uninstall_callback" cmd/
-    cp "$EXISTING_VAR/cmd/config_init" cmd/
-    cp "$EXISTING_VAR/cmd/config_callback" cmd/
-    
-    # Copy UI components (wwbridge + web interface)
-    EXISTING_APP="/vol2/@appcenter/wildwork"
-    if [ -d "$EXISTING_APP/ui" ]; then
-        cp -r "$EXISTING_APP/ui" .
+# Create cmd scripts
+mkdir -p cmd
+cat > cmd/main << 'SCRIPT'
+#!/bin/sh
+# Wild Work service control script for fnOS
+APP_BIN="$TRIM_APPDEST/bin/wild-work"
+SOCK_FILE="$TRIM_APPDEST/app.sock"
+PID_FILE="$TRIM_PKGVAR/wild-work.pid"
+LOG_FILE="$TRIM_PKGVAR/wild-work.log"
+PORT="${TRIM_SERVICE_PORT:-7863}"
+
+is_running() {
+    if [ -f "$PID_FILE" ]; then
+        pid=$(cat "$PID_FILE" 2>/dev/null)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
     fi
-    
-    # Copy config and wizard
-    mkdir -p config wizard
-    if [ -f "$EXISTING_APP/config/privilege" ]; then
-        cp "$EXISTING_APP/config/privilege" config/
-    fi
-    if [ -f "$EXISTING_APP/config/resource" ]; then
-        cp "$EXISTING_APP/config/resource" config/
-    fi
-    for w in install upgrade config; do
-        if [ -f "$EXISTING_VAR/wizard/$w" ]; then
-            cp "$EXISTING_VAR/wizard/$w" wizard/
-        elif [ -f "$EXISTING_APP/wizard/$w" ]; then
-            cp "$EXISTING_APP/wizard/$w" wizard/
+    return 1
+}
+
+case "$1" in
+    start)
+        echo "Starting Wild Work..."
+        mkdir -p "$TRIM_PKGVAR"
+        nohup "$APP_BIN" --no-tray --port "$PORT" > "$LOG_FILE" 2>&1 &
+        echo $! > "$PID_FILE"
+        sleep 2
+        if is_running; then
+            echo "Wild Work started successfully"
+            exit 0
         else
-            echo '[]' > wizard/$w
+            echo "Failed to start Wild Work"
+            exit 1
         fi
-    done
-    
-    # Copy ICON files
-    for icon_src in "$EXISTING_VAR" "$EXISTING_APP"; do
-        if [ -f "$icon_src/ICON.PNG" ]; then
-            cp "$icon_src/ICON.PNG" .
-            break
+        ;;
+    stop)
+        echo "Stopping Wild Work..."
+        if is_running; then
+            pid=$(cat "$PID_FILE")
+            kill "$pid" 2>/dev/null || true
+            rm -f "$PID_FILE"
+            echo "Wild Work stopped"
+        else
+            echo "Wild Work is not running"
         fi
-    done
-    for icon_src in "$EXISTING_VAR" "$EXISTING_APP"; do
-        if [ -f "$icon_src/ICON_256.PNG" ]; then
-            cp "$icon_src/ICON_256.PNG" .
-            break
+        ;;
+    status)
+        if is_running; then
+            echo "running"
+            exit 0
+        else
+            echo "stopped"
+            exit 1
         fi
-    done
-else
-    echo "WARNING: Existing installation not found, creating minimal structure"
-    
-    # Create minimal structures (fallback)
-    mkdir -p ui/images
-    cp app/ui/images/icon_64.png ui/images/
-    cp app/ui/images/icon_256.png ui/images/
-    
-    cat > config/privilege << 'EOF'
-[{"name":"wildwork","description":"Wild Work application user","uid":0,"gid":0}]
-EOF
+        ;;
+    restart)
+        "$0" stop
+        sleep 1
+        "$0" start
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|status|restart}"
+        exit 1
+        ;;
+esac
+SCRIPT
+chmod +x cmd/main
 
-    cat > config/resource << 'EOF'
-[{"name":"wildwork-storage","description":"Storage for Wild Work","path":"/vol2/@apphome/wildwork","read_write":true}]
-EOF
+cat > cmd/install_init << 'SCRIPT'
+#!/bin/sh
+# Installation initialization
+echo "Initializing Wild Work installation..."
+mkdir -p /vol2/@apphome/wildwork
+chown -R wildwork:wildwork /vol2/@apphome/wildwork 2>/dev/null || true
+echo "Installation initialized"
+SCRIPT
+chmod +x cmd/install_init
 
-    echo '[]' > wizard/install
-    echo '[]' > wizard/upgrade
-    echo '[]' > wizard/config
-    
-    # Create minimal icons
-    cp app/ui/images/icon_64.png ICON.PNG
-    cp app/ui/images/icon_256.png ICON_256.PNG
+cat > cmd/install_callback << 'SCRIPT'
+#!/bin/sh
+# Post-installation callback
+echo "Wild Work installation completed successfully"
+SCRIPT
+chmod +x cmd/install_callback
+
+cat > cmd/upgrade_init << 'SCRIPT'
+#!/bin/sh
+# Pre-upgrade initialization
+echo "Preparing for upgrade..."
+SCRIPT
+chmod +x cmd/upgrade_init
+
+cat > cmd/upgrade_callback << 'SCRIPT'
+#!/bin/sh
+# Post-upgrade callback
+echo "Wild Work upgraded successfully"
+SCRIPT
+chmod +x cmd/upgrade_callback
+
+cat > cmd/uninstall_init << 'SCRIPT'
+#!/bin/sh
+# Pre-uninitialization
+echo "Preparing for uninstall..."
+SCRIPT
+chmod +x cmd/uninstall_init
+
+cat > cmd/uninstall_callback << 'SCRIPT'
+#!/bin/sh
+# Post-uninstall callback
+echo "Wild Work uninstalled successfully"
+SCRIPT
+chmod +x cmd/uninstall_callback
+
+cat > cmd/config_init << 'SCRIPT'
+#!/bin/sh
+# Pre-config-change initialization
+echo "Preparing for configuration change..."
+SCRIPT
+chmod +x cmd/config_init
+
+cat > cmd/config_callback << 'SCRIPT'
+#!/bin/sh
+# Post-config-change callback
+echo "Configuration changed successfully"
+SCRIPT
+chmod +x cmd/config_callback
+
+# Create UI directory with index.cgi
+mkdir -p ui/images
+cp app/ui/images/icon_64.png ui/images/
+cp app/ui/images/icon_256.png ui/images/
+
+cat > ui/index.cgi << 'CGI'
+#!/bin/sh
+# Wild Work Web UI entry point
+# Simple static file server for the web interface
+
+APP_DEST="$TRIM_APPDEST"
+WWW_DIR="$APP_DEST/www"
+
+# Check if www directory exists, if not serve from app directory
+if [ ! -d "$WWW_DIR" ]; then
+    WWW_DIR="$APP_DEST"
 fi
 
-# 5. Create manifest (overwrite version only)
+# Simple CGI handler - serve index.html or redirect to main app
+echo "Content-Type: text/html"
+echo ""
+cat << 'HTML'
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wild Work</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; text-align: center; }
+        h1 { color: #333; }
+        .loading { padding: 20px; background: #f5f5f5; border-radius: 8px; }
+    </style>
+</head>
+<body>
+    <h1>Wild Work</h1>
+    <div class="loading">
+        <p>Loading application...</p>
+        <p>If not loaded automatically, <a href="/app/wildwork">click here</a></p>
+    </div>
+    <script>
+        window.location.href = '/app/wildwork';
+    </script>
+</body>
+</html>
+HTML
+CGI
+chmod +x ui/index.cgi
+
+# Create config files
+mkdir -p config
+cat > config/privilege << 'JSON'
+{
+  "defaults": {
+    "run-as": "package"
+  },
+  "username": "wildwork",
+  "groupname": "wildwork"
+}
+JSON
+
+cat > config/resource << 'JSON'
+[
+  {
+    "name": "wildwork-storage",
+    "description": "Storage for Wild Work",
+    "path": "/vol2/@apphome/wildwork",
+    "read_write": true
+  }
+]
+JSON
+
+# Create wizard files (required by fnpack)
+mkdir -p wizard
+echo '[]' > wizard/install
+echo '[]' > wizard/upgrade
+echo '[]' > wizard/config
+
+# Copy ICON files
+cp app/ui/images/icon_64.png ICON.PNG
+cp app/ui/images/icon_256.png ICON_256.PNG
+
+# Create manifest
 cat > manifest << EOF
 appname=wildwork
 version=$VERSION
 display_name=Wild Work
+desc=Wild Work - Multi-channel account aggregator for OpenAI-compatible API
+maintainer=Mickey
+distributor=Mickey
 source=thirdparty
 platform=x86
 ctl_stop=true
@@ -143,11 +279,11 @@ desktop_applaunchname=wildwork.main
 changelog=v$VERSION - $(date +%Y-%m-%d)
 EOF
 
-# 6. Set up app directory structure
+# Set up app directory structure
 mkdir -p app/bin
 cp wild-work app/bin/
 
-# 7. Build FPK package
+# 5. Build FPK package
 echo "Building FPK package..."
 if ! command -v fnpack &> /dev/null; then
     echo "Downloading fnpack..."
@@ -158,7 +294,7 @@ fi
 
 fnpack build -d .
 
-# 8. Verify and output
+# 6. Verify and output
 FPK_FILE="wildwork-$VERSION.fpk"
 mv wildwork.fpk "$FPK_FILE"
 
