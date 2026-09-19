@@ -1,0 +1,120 @@
+name: Check Upstream & Auto-Build
+
+# 每 6 小时检查上游 rockswang/wild-work 的最新 release，
+# 发现新版本且本仓库还没有对应 Release 时，自动触发 build-fpk.yml 打包。
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'   # 每 6 小时
+  workflow_dispatch: {}      # 支持手动立即检查
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get upstream latest release
+        id: upstream
+        run: |
+          resp=$(curl -sf https://api.github.com/repos/rockswang/wild-work/releases/latest)
+          tag=$(echo "$resp" | jq -r '.tag_name')
+          url=$(echo "$resp" | jq -r '.html_url')
+          echo "tag=$tag"  >> "$GITHUB_OUTPUT"
+          echo "url=$url"  >> "$GITHUB_OUTPUT"
+          echo "Upstream latest: $tag ($url)"
+
+      - name: Check if we already built this version
+        id: check
+        run: |
+          tag="${{ steps.upstream.outputs.tag }}"
+          code=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}")
+          echo "Existing release lookup HTTP: $code"
+          if [ "$code" = "200" ]; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "v${tag} already built, nothing to do."
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "New upstream version detected: ${tag}"
+          fi
+
+      - name: Trigger build workflow
+        if: steps.check.outputs.build == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = '${{ steps.upstream.outputs.tag }}';
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'build-fpk.yml',
+              ref: 'main',
+              inputs: {
+                version: tag,
+                upstream_ref: 'master'
+              }
+            });
+            console.log(`Dispatched build-fpk.yml for ${tag}`);
+
+      - name: Wait for build result and create Release
+        if: steps.check.outputs.build == 'true'
+        run: |
+          tag="${{ steps.upstream.outputs.tag }}"
+          echo "Waiting for build of ${tag} to finish..."
+
+          # 轮询最新一次 run（由上面的 dispatch 触发），最长 10 分钟
+          for i in $(seq 1 20); do
+            sleep 30
+            run=$(curl -sf \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs?event=workflow_dispatch&per_page=1" \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}")
+            status=$(echo "$run" | jq -r '.workflow_runs[0].status')
+            conclusion=$(echo "$run" | jq -r '.workflow_runs[0].conclusion')
+            run_id=$(echo "$run" | jq -r '.workflow_runs[0].id')
+            echo "[$i] run $run_id: $status / ${conclusion:-pending}"
+            [ "$status" = "completed" ] && break
+          done
+
+          if [ "$conclusion" != "success" ]; then
+            echo "::error::Build failed for ${tag} (run $run_id, conclusion=$conclusion)"
+            exit 1
+          fi
+
+          # 从 build run 下载 artifact 里的 fpk
+          art=$(curl -sf \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts" \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}")
+          art_id=$(echo "$art" | jq -r '.artifacts[0].id')
+          echo "Downloading artifact $art_id"
+          curl -sfL -o artifact.zip \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${art_id}/zip" \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}"
+          unzip -o artifact.zip
+          ls -la *.fpk
+
+          # 创建 Release（tag = 上游版本号）
+          fpk_file=$(ls wildwork-*.fpk | head -1)
+          curl -sf -X POST \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases" \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            -d "$(jq -n --arg tag "$tag" \
+              '{tag_name:$tag, name:("Wild Work FPK "+$tag), \
+                body:("自动构建于上游 ["+$tag+"](https://github.com/rockswang/wild-work/releases/tag/"+$tag+")。\
+                下载 wildwork-*.fpk 在飞牛 fnOS 应用中心手动安装。"), draft:false, prerelease:false}')" \
+            | jq -r '.html_url' || echo "Release may already exist"
+
+          rel_id=$(curl -sf \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" | jq -r '.id')
+          curl -sf -X POST \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/${rel_id}/assets?name=${fpk_file}" \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary "@${fpk_file}" | jq -r '.browser_download_url'
+
+          echo "Release ready: ${tag} -> ${fpk_file}"
