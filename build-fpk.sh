@@ -197,50 +197,31 @@ echo "Configuration changed successfully"
 SCRIPT
 chmod +x cmd/config_callback
 
-# Create UI directory with index.cgi
+# Create UI directory with index.cgi and config
 mkdir -p ui/images
 cp app/ui/images/icon_64.png ui/images/
 cp app/ui/images/icon_256.png ui/images/
 
+# Create ui/config (required by fnOS)
+cat > ui/config << 'JSON'
+{
+  "name": "Wild Work",
+  "icon": "/ui/images/icon_64.png",
+  "url": "/app/wildwork",
+  "description": "Multi-channel account aggregator for OpenAI-compatible API"
+}
+JSON
+
 cat > ui/index.cgi << 'CGI'
 #!/bin/sh
 # Wild Work Web UI entry point
-# Simple static file server for the web interface
-
-APP_DEST="$TRIM_APPDEST"
-WWW_DIR="$APP_DEST/www"
-
-# Check if www directory exists, if not serve from app directory
-if [ ! -d "$WWW_DIR" ]; then
-    WWW_DIR="$APP_DEST"
-fi
-
-# Simple CGI handler - serve index.html or redirect to main app
 echo "Content-Type: text/html"
 echo ""
 cat << 'HTML'
 <!DOCTYPE html>
 <html>
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Wild Work</title>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 40px; text-align: center; }
-        h1 { color: #333; }
-        .loading { padding: 20px; background: #f5f5f5; border-radius: 8px; }
-    </style>
-</head>
-<body>
-    <h1>Wild Work</h1>
-    <div class="loading">
-        <p>Loading application...</p>
-        <p>If not loaded automatically, <a href="/app/wildwork">click here</a></p>
-    </div>
-    <script>
-        window.location.href = '/app/wildwork';
-    </script>
-</body>
+<head><meta charset="UTF-8"><title>Wild Work</title></head>
+<body><h1>Wild Work</h1><p>Loading...</p></body>
 </html>
 HTML
 CGI
