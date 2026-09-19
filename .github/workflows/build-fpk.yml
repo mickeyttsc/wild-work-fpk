@@ -35,10 +35,10 @@ jobs:
 
       - name: Build FPK package
         run: |
-          chmod +x scripts/build-fpk.sh
+          chmod +x build-fpk.sh
           VERSION="${{ github.event.inputs.version || github.ref_name }}"
           UPSTREAM_REF="${{ github.event.inputs.upstream_ref || 'main' }}"
-          bash scripts/build-fpk.sh "$VERSION" "$UPSTREAM_REF"
+          bash build-fpk.sh "$VERSION" "$UPSTREAM_REF"
 
       - name: Upload FPK artifact
         uses: actions/upload-artifact@v4
