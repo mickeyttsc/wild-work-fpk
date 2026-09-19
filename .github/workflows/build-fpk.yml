@@ -11,9 +11,12 @@ on:
         required: true
         default: 'v2.2.2'
       upstream_ref:
-        description: 'Upstream git ref (tag/commit)'
+        description: 'Upstream git ref (tag/commit/branch)'
         required: true
-        default: 'main'
+        default: 'master'
+  schedule:
+    # 每天 01:00 UTC 检查上游新版本（tag 触发为主，此为兜底）
+    - cron: '0 1 * * *'
 
 jobs:
   build-fpk:
@@ -25,8 +28,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
-          cache: true
+          go-version: 'stable'
 
       - name: Install ImageMagick (for icon processing)
         run: |
@@ -37,13 +39,13 @@ jobs:
         run: |
           chmod +x build-fpk.sh
           VERSION="${{ github.event.inputs.version || github.ref_name }}"
-          UPSTREAM_REF="${{ github.event.inputs.upstream_ref || 'main' }}"
+          UPSTREAM_REF="${{ github.event.inputs.upstream_ref || 'master' }}"
           bash build-fpk.sh "$VERSION" "$UPSTREAM_REF"
 
       - name: Upload FPK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wildwork-fpk-${{ github.event.inputs.version || github.ref_name }}
+          name: wildwork-fpk
           path: wildwork-*.fpk
           retention-days: 30
 
