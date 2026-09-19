@@ -109,7 +109,7 @@ jobs:
             "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" | jq -r '.id')
           curl -sf -X POST \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/${rel_id}/assets?name=${fpk_file}" \
+            "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${rel_id}/assets?name=${fpk_file}" \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Content-Type: application/octet-stream" \
             --data-binary "@${fpk_file}" | jq -r '.browser_download_url'
