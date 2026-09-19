@@ -259,14 +259,13 @@ cat > config/privilege << 'JSON'
 JSON
 
 cat > config/resource << 'JSON'
-[
-  {
-    "name": "wildwork-storage",
+{
+  "wildwork-storage": {
     "description": "Storage for Wild Work",
     "path": "/vol2/@apphome/wildwork",
     "read_write": true
   }
-]
+}
 JSON
 
 # Create wizard files (required by fnpack)
