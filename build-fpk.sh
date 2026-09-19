@@ -15,9 +15,26 @@ echo "Version: $VERSION"
 echo "Upstream ref: $UPSTREAM_REF"
 echo "Work dir: $WORK_DIR"
 
-# 1. Clone upstream
-git clone --depth 1 --branch "$UPSTREAM_REF" https://github.com/rockswang/wild-work.git upstream
+# 1. Clone upstream (auto-detect default branch)
+git clone --depth 1 https://github.com/rockswang/wild-work.git upstream
 cd upstream
+
+# Auto-detect default branch if specific ref not provided
+if [ -n "$UPSTREAM_REF" ] && [ "$UPSTREAM_REF" != "main" ]; then
+    REF="$UPSTREAM_REF"
+else
+    # Check if master exists, otherwise use main
+    if git show-ref --verify --quiet refs/remotes/origin/master; then
+        REF="master"
+    else
+        REF="main"
+    fi
+fi
+
+echo "Using upstream branch: $REF"
+
+# Checkout the correct branch/tag
+git checkout "$REF" 2>/dev/null || git checkout -b temp-branch origin/master 2>/dev/null || true
 
 # 2. Build binary
 go mod download
