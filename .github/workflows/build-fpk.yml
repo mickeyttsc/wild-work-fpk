@@ -39,11 +39,27 @@ jobs:
       - name: Build FPK package
         run: |
           chmod +x build-fpk.sh
-          VERSION="${{ github.event.inputs.version || github.ref_name }}"
-          # 兜底也按 release tag 检出；check-upstream 会显式传 tag，只有手动触发且
-          # 未填时才走这里，此时 VERSION 就是 tag
-          UPSTREAM_REF="${{ github.event.inputs.upstream_ref || github.event.inputs.version || github.ref_name }}"
+          # 手动触发：直接用输入值
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+            UPSTREAM_REF="${{ github.event.inputs.upstream_ref }}"
+          else
+            # tag 触发（push v*）：github.ref_name 是本仓库的**打包版本 tag**
+            # （如 v2.3.1-1），它在上游仓库里并不存在，绝不能拿它去 clone 上游。
+            # 约定：打包 tag = 上游 tag + 可选 -N 后缀，去掉 -N 即上游 ref。
+            PKG_TAG="${{ github.ref_name }}"
+            UPSTREAM_REF="${PKG_TAG%-*}"
+            # 防呆：若没有 -N 后缀，则 %-* 不匹配，UPSTREAM_REF 等于 PKG_TAG 本身，
+            # 此时它本就应当是一个上游 tag。
+            VERSION="$UPSTREAM_REF"
+            echo "tag 触发：打包版本=$PKG_TAG，上游 ref=$UPSTREAM_REF"
+          fi
+          if [ -z "$VERSION" ] || [ -z "$UPSTREAM_REF" ]; then
+            echo "FATAL: VERSION / UPSTREAM_REF 解析为空（VERSION='$VERSION' REF='$UPSTREAM_REF'）"
+            exit 1
+          fi
           bash build-fpk.sh "$VERSION" "$UPSTREAM_REF"
+          ls -la wildwork-*.fpk
 
       - name: Upload FPK artifact
         uses: actions/upload-artifact@v4
