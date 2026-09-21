@@ -22,6 +22,10 @@ on:
 jobs:
   build-fpk:
     runs-on: ubuntu-latest
+    # ★ 必须显式声明：仓库默认 workflow 权限是 read，
+    #   不声明则 softprops/action-gh-release 建 release 会被拒（HTTP 403）。
+    permissions:
+      contents: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
