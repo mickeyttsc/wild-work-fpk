@@ -55,7 +55,9 @@ jobs:
               ref: 'main',
               inputs: {
                 version: tag,
-                upstream_ref: 'master'
+                # ★ 检出上游 release tag 对应的源码，不能用 master（否则编出来的
+                #   二进制与 release 产物不一致）
+                upstream_ref: tag
               }
             });
             console.log(`Dispatched build-fpk.yml for ${tag}`);

@@ -11,8 +11,9 @@
 
 set -ex
 
-VERSION=${1:-v2.2.2}
-UPSTREAM_REF=${2:-master}
+VERSION=${1:-v2.3.1}
+# 默认按 release tag 检出（与 VERSION 一致），不要用 master
+UPSTREAM_REF=${2:-${1:-v2.3.1}}
 PKG_VERSION="${VERSION#v}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK_DIR=$(mktemp -d)
@@ -28,8 +29,12 @@ TPL="$SCRIPT_DIR/template"
 UPSTREAM="$WORK_DIR/upstream"
 
 # ---------- 1. 克隆并编译上游 ----------
+# ★ 必须按 release tag 检出，不能用 master：
+#   master 是开发分支，可能领先/落后于已发布的 release，编出来的二进制
+#   与 release 产物不一致（哈希对不上、版本号可能带脏后缀）。
+#   UPSTREAM_REF 由 check-upstream.yml 传入上游 release 的 tag（如 v2.3.1）。
 git clone --depth 1 --branch "$UPSTREAM_REF" https://github.com/rockswang/wild-work.git "$UPSTREAM" \
-  || git clone --depth 1 https://github.com/rockswang/wild-work.git "$UPSTREAM"
+  || { echo "FATAL: 无法按 ref '$UPSTREAM_REF' 克隆上游（tag 不存在？）"; exit 1; }
 
 ls -la "$UPSTREAM" | head -20
 

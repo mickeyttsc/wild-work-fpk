@@ -7,13 +7,14 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version tag (e.g. v2.2.2)'
+        description: 'Upstream release tag (e.g. v2.3.1)'
         required: true
-        default: 'v2.2.2'
+        default: 'v2.3.1'
       upstream_ref:
-        description: 'Upstream git ref (tag/commit/branch)'
+        # 默认与 version 对齐：按 release tag 检出，不要用 master
+        description: 'Upstream git ref (should match the release tag)'
         required: true
-        default: 'master'
+        default: 'v2.3.1'
   schedule:
     # 每天 01:00 UTC 检查上游新版本（tag 触发为主，此为兜底）
     - cron: '0 1 * * *'
@@ -39,7 +40,9 @@ jobs:
         run: |
           chmod +x build-fpk.sh
           VERSION="${{ github.event.inputs.version || github.ref_name }}"
-          UPSTREAM_REF="${{ github.event.inputs.upstream_ref || 'master' }}"
+          # 兜底也按 release tag 检出；check-upstream 会显式传 tag，只有手动触发且
+          # 未填时才走这里，此时 VERSION 就是 tag
+          UPSTREAM_REF="${{ github.event.inputs.upstream_ref || github.event.inputs.version || github.ref_name }}"
           bash build-fpk.sh "$VERSION" "$UPSTREAM_REF"
 
       - name: Upload FPK artifact
