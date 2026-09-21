@@ -60,13 +60,28 @@ cp "$TPL/bin-config.json" "$BUILD_ROOT/app/bin/config.json"
 cp "$TPL/ui/config" "$BUILD_ROOT/app/ui/config"
 cp "$TPL/ui/index.cgi" "$BUILD_ROOT/app/ui/index.cgi"
 chmod +x "$BUILD_ROOT/app/ui/index.cgi"
-if [ -f "$UPSTREAM/icon.png" ] && command -v convert &>/dev/null; then
-    convert "$UPSTREAM/icon.png" -resize 64x64 "$BUILD_ROOT/app/ui/images/icon_64.png"
-    convert "$UPSTREAM/icon.png" -resize 256x256 "$BUILD_ROOT/app/ui/images/icon_256.png"
-else
-    cp "$TPL/ui/images/icon_64.png" "$BUILD_ROOT/app/ui/images/"
-    cp "$TPL/ui/images/icon_256.png" "$BUILD_ROOT/app/ui/images/"
+
+# ★ 图标用上游官方图标（黑底 + 荧光绿笔刷 "W"），不要用 template 里的占位图。
+#   上游 icon.png 与 build/appicon.png 内容完全相同（同为 858x858），指向
+#   build/appicon.png 是为了不依赖顶层 icon.png 的检出结果。
+#   注意：绝不能静默回退到 template 图标——那会让桌面显示蓝色的 "WWW" 占位图，
+#   且失败被吞掉无从察觉。取不到就直接 FATAL。
+UPSTREAM_ICON=""
+for cand in "$UPSTREAM/build/appicon.png" "$UPSTREAM/icon.png"; do
+    if [ -f "$cand" ]; then UPSTREAM_ICON="$cand"; break; fi
+done
+if [ -z "$UPSTREAM_ICON" ]; then
+    echo "FATAL: 上游源码里找不到图标（试过 build/appicon.png 与 icon.png）"
+    echo "--- $UPSTREAM 顶层内容 ---"; ls -la "$UPSTREAM"
+    exit 1
 fi
+echo "Using upstream icon: $UPSTREAM_ICON ($(sha256sum "$UPSTREAM_ICON" | cut -d' ' -f1))"
+if ! command -v convert &>/dev/null; then
+    echo "FATAL: 缺少 ImageMagick 的 convert，无法生成 64/256 图标"
+    exit 1
+fi
+convert "$UPSTREAM_ICON" -resize 64x64 "$BUILD_ROOT/app/ui/images/icon_64.png"
+convert "$UPSTREAM_ICON" -resize 256x256 "$BUILD_ROOT/app/ui/images/icon_256.png"
 
 # cmd/: 生命周期脚本（照搬真机模板）
 for f in main install_init install_callback upgrade_init upgrade_callback \
@@ -84,9 +99,11 @@ for w in install upgrade config; do
     cp "$TPL/wizard/$w" "$BUILD_ROOT/wizard/$w"
 done
 
-# 顶层图标
-cp "$TPL/ui/images/icon_64.png" "$BUILD_ROOT/ICON.PNG"
-cp "$TPL/ui/images/icon_256.png" "$BUILD_ROOT/ICON_256.PNG"
+# 顶层图标（app center / 桌面读的就是这两个）
+# ★ 必须用上一步 generate 出来的图标，不能再从 template 拷——
+#   template 是占位图，拷过来会让顶层图标与 app/ui/images 里的不一致。
+cp "$BUILD_ROOT/app/ui/images/icon_64.png" "$BUILD_ROOT/ICON.PNG"
+cp "$BUILD_ROOT/app/ui/images/icon_256.png" "$BUILD_ROOT/ICON_256.PNG"
 
 # manifest: CRLF 换行（与原包一致；fnpack 会规范化）
 M="$BUILD_ROOT/manifest"
@@ -94,7 +111,7 @@ printf 'appname               = wildwork\r\n' > "$M"
 printf 'version               = %s\r\n' "$PKG_VERSION" >> "$M"
 printf 'display_name          = Wild Work\r\n' >> "$M"
 printf 'desc                  = wild-work 账号池代理（自封装版）。提供 OpenAI 兼容 API（/v1）与内置 Web 控制台，默认端口 7863。多渠道聚合，支持自动签到。状态数据保存在应用数据目录，登录凭据保存在应用配置目录。\r\n' >> "$M"
-printf 'maintainer            = Mickey\r\n' >> "$M"
+printf 'maintainer            = rockswang\r\n' >> "$M"
 printf 'distributor           = Mickey\r\n' >> "$M"
 printf 'source                = thirdparty\r\n' >> "$M"
 printf 'platform              = x86\r\n' >> "$M"
