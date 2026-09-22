@@ -42,25 +42,16 @@ jobs:
             echo "New upstream version detected: ${tag}"
           fi
 
-      - name: Trigger build workflow
+- name: Trigger build workflow
         if: steps.check.outputs.build == 'true'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const tag = '${{ steps.upstream.outputs.tag }}';
-            await github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: 'build-fpk.yml',
-              ref: 'main',
-              inputs: {
-                version: tag,
-                # ★ 检出上游 release tag 对应的源码，不能用 master（否则编出来的
-                #   二进制与 release 产物不一致）
-                upstream_ref: tag
-              }
-            });
-            console.log(`Dispatched build-fpk.yml for ${tag}`);
+        run: |
+          tag="${{ steps.upstream.outputs.tag }}"
+          curl -sf -X POST \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/build-fpk.yml/dispatches" \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            -d "{\"ref\":\"main\",\"inputs\":{\"version\":\"${tag}\",\"upstream_ref\":\"${tag}\"}}" || echo "Dispatch failed, may already be running"
 
       - name: Wait for build result and create Release
         if: steps.check.outputs.build == 'true'
