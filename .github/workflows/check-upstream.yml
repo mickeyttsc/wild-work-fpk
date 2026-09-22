@@ -42,7 +42,7 @@ jobs:
             echo "New upstream version detected: ${tag}"
           fi
 
-- name: Trigger build workflow
+      - name: Trigger build workflow
         if: steps.check.outputs.build == 'true'
         run: |
           tag="${{ steps.upstream.outputs.tag }}"
