@@ -1,11 +1,11 @@
 name: Check Upstream & Auto-Build
 
-# 每 6 小时检查上游 rockswang/wild-work 的最新 release，
+# 每 2 小时检查上游 rockswang/wild-work 的最新 release，
 # 发现新版本且本仓库还没有对应 Release 时，自动触发 build-fpk.yml 打包。
 
 on:
   schedule:
-    - cron: '0 */2 * * *'   # 每 6 小时
+    - cron: '0 */2 * * *'   # 每 2 小时
   workflow_dispatch: {}      # 支持手动立即检查
 
 permissions:
