@@ -19,7 +19,7 @@ jobs:
       - name: Get upstream latest release
         id: upstream
         run: |
-          resp=$(curl -sf https://api.github.com/repos/rockswang/wild-work/releases/latest)
+          resp=$(curl -sf -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/rockswang/wild-work/releases/latest)
           tag=$(echo "$resp" | jq -r '.tag_name')
           url=$(echo "$resp" | jq -r '.html_url')
           echo "tag=$tag"  >> "$GITHUB_OUTPUT"
@@ -64,6 +64,7 @@ jobs:
             sleep 30
             run=$(curl -sf \
               "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs?event=workflow_dispatch&per_page=1" \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
               -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}")
             status=$(echo "$run" | jq -r '.workflow_runs[0].status')
             conclusion=$(echo "$run" | jq -r '.workflow_runs[0].conclusion')
@@ -80,6 +81,7 @@ jobs:
           # 从 build run 下载 artifact 里的 fpk
           art=$(curl -sf \
             "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts" \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}")
           art_id=$(echo "$art" | jq -r '.artifacts[0].id')
           echo "Downloading artifact $art_id"
