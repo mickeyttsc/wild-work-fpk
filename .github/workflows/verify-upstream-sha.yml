@@ -1,0 +1,55 @@
+name: Verify Upstream Build SHA
+
+# 一次性取证工作流：在干净 runner 上按 tag 编译上游二进制，打印 sha256。
+# 用来回答「CI 自编译产物的 sha256 与官方 release asset digest 是否一致」。
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: 'upstream tag, e.g. v2.5.2'
+        required: true
+        default: 'v2.5.2'
+      ldflags:
+        description: 'ldflags to use'
+        required: true
+        default: '-s -w'
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout upstream at tag
+        uses: actions/checkout@v4
+        with:
+          repository: rockswang/wild-work
+          ref: ${{ inputs.upstream_ref }}
+          path: upstream
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache-dir: ''
+
+      - name: Build (stripped) and report sha256
+        working-directory: upstream
+        run: |
+          set -x
+          go version
+          go mod download
+          go build -o /tmp/wild-work-stripped -ldflags="${{ inputs.ldflags }}" ./cmd/wild-work
+          ls -la /tmp/wild-work-stripped
+          sha256sum /tmp/wild-work-stripped
+
+      - name: Build (unstripped) and report sha256
+        working-directory: upstream
+        run: |
+          set -x
+          go build -o /tmp/wild-work-plain ./cmd/wild-work
+          ls -la /tmp/wild-work-plain
+          sha256sum /tmp/wild-work-plain
+
+      - name: Checkout official release asset digest
+        run: |
+          curl -sL https://api.github.com/repos/rockswang/wild-work/releases/tags/${{ inputs.upstream_ref }} \
+            | python3 -c "import json,sys;d=json.load(sys.stdin);[print('ASSET',a['name'],a['size'],a.get('digest')) for a in d.get('assets',[])]"
