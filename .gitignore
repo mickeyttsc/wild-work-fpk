@@ -1,0 +1,45 @@
+# ── 构建产物 ────────────────────────────────────────────────
+# fpk 由 CI 构建并按 Release 分发，不应进仓库。
+*.fpk
+# fnpack 的中间目录与工作区
+/wildwork.fpk
+/upstream/
+/pkg/
+/dist/
+/build-tmp/
+
+# ── 运行时数据 / 凭据（最要紧的一类）────────────────────────
+# 这些是 wildwork 应用真实运行文件，绝不能进公开仓库。
+admin-password.txt
+config.json.pre-admin-auth.bak
+config.json
+*.pre-upgrade.bak
+# 渠道账号凭据
+auth/
+@appconf/
+@appdata/
+@apphome/
+state-*.json
+login-state.json
+*.log
+
+# ── 环境 / 密钥 ──────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa*
+token
+tokens.json
+credentials*
+!credentials.example.json
+
+# ── 本地脚本草稿与临时文件 ──────────────────────────────────
+*.bak
+*.bak.*
+*.orig
+*.tmp
+*.swp
+*~
+.DS_Store

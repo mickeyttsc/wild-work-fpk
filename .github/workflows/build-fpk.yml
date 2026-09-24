@@ -30,6 +30,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # 敏感信息门禁：放在最前面，命中就 fail ——
+      # 这个仓库是公开的，凭据/内网地址一旦进历史就撤不回来。
+      # 打包是自动化的，不能指望每次有人手工检查。
+      - name: Scan for secrets / private environment info
+        run: |
+          chmod +x scripts/scan-secrets.sh
+          ./scripts/scan-secrets.sh
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
