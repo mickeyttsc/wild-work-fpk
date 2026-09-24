@@ -30,6 +30,7 @@ APP_BIN="$APP_DIR/bin/wild-work"
 BRIDGE_BIN="$APP_DIR/bin/wwbridge"
 LIFECYCLE="$PKG_ROOT/cmd/main"
 SHIPPED_CFG="$APP_DIR/bin/config.json"
+WIZARD_DIR="$PKG_ROOT/wizard"
 
 for f in "$APP_BIN" "$BRIDGE_BIN" "$LIFECYCLE" "$SHIPPED_CFG"; do
     if [ ! -f "$f" ]; then
@@ -379,5 +380,101 @@ TRIM_PKGTMP="$KEEPW_DIR/tmp" TRIM_SERVICE_PORT="$KEEPW_PORT" \
     bash "$KEEPW_DIR/main" stop >/dev/null 2>&1 || true
 rm -rf "$KEEPW_DIR"
 echo "upgrade keeps the user's existing password (wizard value ignored)"
+
+# --- 断言 5：升级向导不得再出现密码输入框 ---
+# 用户已经设过密码，升级时再弹「设置管理密码」只会让人困惑（填了不生效、
+# 不填又不知道会怎样）。官方 wizard 没有条件跳过机制，手段是 install/upgrade
+# 各用一份文件 —— 升级那份不带 password 字段。这个约束靠断言钉住，
+# 免得以后有人"顺手统一"两份向导又把它加回来。
+wizard_password_field_count() {
+    python3 - "$1" <<'PY'
+import json
+import sys
+from pathlib import Path
+p = Path(sys.argv[1])
+if not p.is_file():
+    print(0)
+    raise SystemExit(0)
+try:
+    data = json.loads(p.read_text(encoding="utf-8"))
+except Exception:
+    print(-1)
+    raise SystemExit(0)
+print(sum(1 for s in data for i in s.get("items", []) if i.get("type") == "password"))
+PY
+}
+
+UPGRADE_WIZARD="$WIZARD_DIR/upgrade"
+INSTALL_WIZARD="$WIZARD_DIR/install"
+n_up=$(wizard_password_field_count "$UPGRADE_WIZARD")
+n_in=$(wizard_password_field_count "$INSTALL_WIZARD")
+if [ "$n_up" != "0" ]; then
+    echo "wizard/upgrade 不应含密码输入框（已有密码的用户不该被要求重填），实际有 $n_up 个" >&2
+    exit 1
+fi
+if [ "$n_in" != "1" ]; then
+    echo "wizard/install 应当恰好有 1 个密码输入框，实际 $n_in 个" >&2
+    exit 1
+fi
+echo "wizard: install 有密码输入框、upgrade 没有（升级无需重填）"
+
+# --- 断言 6：老版本（无密码）升级 → 落到默认 password 且能登录 ---
+# 这类用户没有在安装向导填过密码（是升级上来的），若不落到已知默认值，
+# 他们装完就完全进不去控制台。
+MIG_DIR=$(mktemp -d)
+mkdir -p "$MIG_DIR/app/bin" "$MIG_DIR/var" "$MIG_DIR/etc/auth" "$MIG_DIR/home" "$MIG_DIR/tmp"
+cp "$APP_BIN" "$MIG_DIR/app/bin/wild-work"
+cp "$BRIDGE_BIN" "$MIG_DIR/app/bin/wwbridge"
+cp "$SHIPPED_CFG" "$MIG_DIR/app/bin/config.json"
+cp "$LIFECYCLE" "$MIG_DIR/main"
+chmod 755 "$MIG_DIR/app/bin/wild-work" "$MIG_DIR/app/bin/wwbridge" "$MIG_DIR/main"
+MIG_PORT=$(free_port)
+# 老版本配置：合法 listen、有用户数据、但**没有** admin_password
+printf '{\n  "listen": {"host": "0.0.0.0", "port": %s},\n  "api_key": "old-user-key"\n}\n' \
+    "$MIG_PORT" > "$MIG_DIR/var/config.json"
+chmod 600 "$MIG_DIR/var/config.json"
+TRIM_APPDEST="$MIG_DIR/app" TRIM_PKGVAR="$MIG_DIR/var" \
+TRIM_PKGETC="$MIG_DIR/etc" TRIM_PKGHOME="$MIG_DIR/home" \
+TRIM_PKGTMP="$MIG_DIR/tmp" TRIM_SERVICE_PORT="$MIG_PORT" \
+TRIM_TEMP_LOGFILE="$MIG_DIR/start-error.log" \
+    bash "$MIG_DIR/main" start >/dev/null
+MIG_PW=$(CFG="$MIG_DIR/app/bin/config.json" python3 -c "
+import json,os
+from pathlib import Path
+print(json.loads(Path(os.environ['CFG']).read_text(encoding='utf-8')).get('admin_password',''))
+")
+if [ "$MIG_PW" != "password" ]; then
+    echo "老版本升级应落到默认密码 'password'，实际 '$MIG_PW'" >&2
+    exit 1
+fi
+MIG_JAR=$(mktemp)
+MIG_CODE=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 -c "$MIG_JAR" \
+    -H 'Content-Type: application/json' -d '{"password":"password"}' \
+    "http://127.0.0.1:$MIG_PORT/api/auth/login")
+if [ "$MIG_CODE" != "200" ]; then
+    rm -f "$MIG_JAR"
+    echo "老版本升级后默认密码无法登录（HTTP $MIG_CODE）" >&2
+    exit 1
+fi
+MIG_CODE=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 -b "$MIG_JAR" \
+    "http://127.0.0.1:$MIG_PORT/api/state")
+rm -f "$MIG_JAR"
+if [ "$MIG_CODE" != "200" ]; then
+    echo "老版本升级后默认密码登录拿不到 /api/state（HTTP $MIG_CODE）" >&2
+    exit 1
+fi
+# 用户原设置必须还在
+CFG="$MIG_DIR/app/bin/config.json" python3 -c "
+import json,os
+from pathlib import Path
+d=json.loads(Path(os.environ['CFG']).read_text(encoding='utf-8'))
+assert d.get('api_key')=='old-user-key', d
+"
+TRIM_APPDEST="$MIG_DIR/app" TRIM_PKGVAR="$MIG_DIR/var" \
+TRIM_PKGETC="$MIG_DIR/etc" TRIM_PKGHOME="$MIG_DIR/home" \
+TRIM_PKGTMP="$MIG_DIR/tmp" TRIM_SERVICE_PORT="$MIG_PORT" \
+    bash "$MIG_DIR/main" stop >/dev/null 2>&1 || true
+rm -rf "$MIG_DIR"
+echo "passwordless legacy upgrade lands on default 'password' and it logs in"
 
 echo "both startup compatibility paths passed"
