@@ -109,8 +109,11 @@ for raw in paths:
     if "listen_host" in data or "listen_port" in data:
         raise SystemExit(f"[{label}] legacy keys not migrated out of {p}")
     pw = data.get("admin_password")
-    if not isinstance(pw, str) or len(pw.strip()) < 24:
-        raise SystemExit(f"[{label}] admin_password missing/too short in {p}")
+    # 下限定在 8 位：与安装向导的 min 规则一致，同时挡住空密码。
+    # 不能要求「够长」的随机串 —— 默认密码是 password（8 位），
+    # 用户也可以在向导里设 8 位密码，写死 24 会把这些合法情况全判成失败。
+    if not isinstance(pw, str) or len(pw.strip()) < 8:
+        raise SystemExit(f"[{label}] admin_password missing/too short in {p}: {pw!r}")
     passwords.add(pw)
 if len(passwords) != 1:
     raise SystemExit(f"[{label}] the three configs disagree on the admin password")
@@ -169,6 +172,15 @@ run_case() {
         exit 1
     fi
 
+    # 全新安装（向导留空）额外钉死默认密码
+    if [ "$label" = "fresh" ]; then
+        if ! assert_fresh_default_password "$tmp" "$port"; then
+            bash "$tmp/main" stop >/dev/null 2>&1 || true
+            rm -rf "$tmp"
+            exit 1
+        fi
+    fi
+
     bash "$tmp/main" stop >/dev/null 2>&1 || true
     rm -rf "$tmp"
 }
@@ -190,6 +202,46 @@ data = json.loads(p.read_text(encoding="utf-8"))
 if data.get("admin_password"):
     raise SystemExit("fresh-install fixture must not ship an admin_password")
 PY
+}
+
+# 全新安装且向导留空时，密码必须正好是文档承诺的默认值。
+# 这是用户唯一能从安装界面知道的东西 —— 一旦漂回随机串，
+# 用户装完就进不去控制台，且没有任何地方能查到密码。
+assert_fresh_default_password() {
+    local tmp="$1" port="$2" pw
+    pw=$(CFG="$tmp/app/bin/config.json" python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+print(json.loads(Path(os.environ["CFG"]).read_text(encoding="utf-8")).get("admin_password", ""))
+PY
+)
+    if [ "$pw" != "password" ]; then
+        echo "[fresh] 留空时应当使用默认密码 'password'，实际是 '$pw'" >&2
+        exit 1
+    fi
+    # 默认密码必须真的能登录（不是只写进文件里）。
+    # 注意：面板鉴权是 **cookie session**，不是把 admin_password 当 Bearer token：
+    #   1) POST /api/auth/login {"password": "..."} → Set-Cookie: ww_admin=<token>
+    #   2) 带该 cookie 请求 /api/state 才得 200
+    # 直接用 Bearer 打 /api/state 必然 401 —— 那不是密码错，是鉴权方式不对。
+    local jar code
+    jar=$(mktemp)
+    code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 -c "$jar" \
+        -H 'Content-Type: application/json' \
+        -d "{\"password\":\"$pw\"}" "http://127.0.0.1:$port/api/auth/login")
+    if [ "$code" != "200" ]; then
+        rm -f "$jar"
+        echo "[fresh] 默认密码 'password' 登录失败（/api/auth/login HTTP $code，期望 200）" >&2
+        exit 1
+    fi
+    code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 -b "$jar" \
+        "http://127.0.0.1:$port/api/state")
+    rm -f "$jar"
+    if [ "$code" != "200" ]; then
+        echo "[fresh] 默认密码登录后仍拿不到 /api/state（HTTP $code，期望 200）" >&2
+        exit 1
+    fi
 }
 
 # --- case 2: 旧版升级（老形状配置，无 admin_password，含自定义字段需保留）---
@@ -245,5 +297,87 @@ TRIM_PKGTMP="$KEEPCHECK_DIR/tmp" TRIM_SERVICE_PORT="$KEEP_PORT" \
     bash "$KEEPCHECK_DIR/main" stop >/dev/null 2>&1 || true
 rm -rf "$KEEPCHECK_DIR"
 echo "legacy user settings preserved + rollback point written"
+
+# --- 断言 3：安装向导设的密码必须在全新安装时生效 ---
+# 用户视角：安装界面填了密码，装完就该能用它登录，而不是被随机串顶掉。
+WIZCHECK_DIR=$(mktemp -d)
+mkdir -p "$WIZCHECK_DIR/app/bin" "$WIZCHECK_DIR/var" "$WIZCHECK_DIR/etc/auth" \
+    "$WIZCHECK_DIR/home" "$WIZCHECK_DIR/tmp"
+cp "$APP_BIN" "$WIZCHECK_DIR/app/bin/wild-work"
+cp "$BRIDGE_BIN" "$WIZCHECK_DIR/app/bin/wwbridge"
+cp "$SHIPPED_CFG" "$WIZCHECK_DIR/app/bin/config.json"
+cp "$LIFECYCLE" "$WIZCHECK_DIR/main"
+chmod 755 "$WIZCHECK_DIR/app/bin/wild-work" "$WIZCHECK_DIR/app/bin/wwbridge" "$WIZCHECK_DIR/main"
+WIZ_PORT=$(free_port)
+WIZ_PW="wizard-chosen-password-9f3a"
+TRIM_APPDEST="$WIZCHECK_DIR/app" TRIM_PKGVAR="$WIZCHECK_DIR/var" \
+TRIM_PKGETC="$WIZCHECK_DIR/etc" TRIM_PKGHOME="$WIZCHECK_DIR/home" \
+TRIM_PKGTMP="$WIZCHECK_DIR/tmp" TRIM_SERVICE_PORT="$WIZ_PORT" \
+TRIM_TEMP_LOGFILE="$WIZCHECK_DIR/start-error.log" \
+wizard_admin_password="$WIZ_PW" \
+    bash "$WIZCHECK_DIR/main" start >/dev/null
+for cfg in "$WIZCHECK_DIR/app/bin/config.json" "$WIZCHECK_DIR/var/config.json" "$WIZCHECK_DIR/home/config.json"; do
+    CFG="$cfg" WANT="$WIZ_PW" python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+data = json.loads(Path(os.environ["CFG"]).read_text(encoding="utf-8"))
+if data.get("admin_password") != os.environ["WANT"]:
+    raise SystemExit(
+        f"wizard password not applied in {os.environ['CFG']}: got {data.get('admin_password')!r}")
+PY
+done
+PW_FILE="$WIZCHECK_DIR/home/admin-password.txt" WANT="$WIZ_PW" python3 - <<'PY'
+import os
+from pathlib import Path
+got = Path(os.environ["PW_FILE"]).read_text(encoding="utf-8").strip()
+if got != os.environ["WANT"]:
+    raise SystemExit(f"admin-password.txt does not carry the wizard password: {got!r}")
+PY
+TRIM_APPDEST="$WIZCHECK_DIR/app" TRIM_PKGVAR="$WIZCHECK_DIR/var" \
+TRIM_PKGETC="$WIZCHECK_DIR/etc" TRIM_PKGHOME="$WIZCHECK_DIR/home" \
+TRIM_PKGTMP="$WIZCHECK_DIR/tmp" TRIM_SERVICE_PORT="$WIZ_PORT" \
+    bash "$WIZCHECK_DIR/main" stop >/dev/null 2>&1 || true
+rm -rf "$WIZCHECK_DIR"
+echo "install-wizard password applied to all configs + password file"
+
+# --- 断言 4：升级时向导值绝不能覆盖用户已有密码 ---
+# 用户视角：升级界面也带这个字段，若它覆盖既有密码，等于升级时被静默改凭据，
+# 用户下次登录就进不去了。
+KEEPW_DIR=$(mktemp -d)
+mkdir -p "$KEEPW_DIR/app/bin" "$KEEPW_DIR/var" "$KEEPW_DIR/etc/auth" \
+    "$KEEPW_DIR/home" "$KEEPW_DIR/tmp"
+cp "$APP_BIN" "$KEEPW_DIR/app/bin/wild-work"
+cp "$BRIDGE_BIN" "$KEEPW_DIR/app/bin/wwbridge"
+cp "$SHIPPED_CFG" "$KEEPW_DIR/app/bin/config.json"
+cp "$LIFECYCLE" "$KEEPW_DIR/main"
+chmod 755 "$KEEPW_DIR/app/bin/wild-work" "$KEEPW_DIR/app/bin/wwbridge" "$KEEPW_DIR/main"
+KEEPW_PORT=$(free_port)
+printf '{\n  "listen": {"host": "0.0.0.0", "port": %s},\n  "admin_password": "user-existing-secret"\n}\n' \
+    "$KEEPW_PORT" > "$KEEPW_DIR/var/config.json"
+chmod 600 "$KEEPW_DIR/var/config.json"
+TRIM_APPDEST="$KEEPW_DIR/app" TRIM_PKGVAR="$KEEPW_DIR/var" \
+TRIM_PKGETC="$KEEPW_DIR/etc" TRIM_PKGHOME="$KEEPW_DIR/home" \
+TRIM_PKGTMP="$KEEPW_DIR/tmp" TRIM_SERVICE_PORT="$KEEPW_PORT" \
+TRIM_TEMP_LOGFILE="$KEEPW_DIR/start-error.log" \
+wizard_admin_password="must-not-override" \
+    bash "$KEEPW_DIR/main" start >/dev/null
+for cfg in "$KEEPW_DIR/app/bin/config.json" "$KEEPW_DIR/var/config.json" "$KEEPW_DIR/home/config.json"; do
+    CFG="$cfg" python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+data = json.loads(Path(os.environ["CFG"]).read_text(encoding="utf-8"))
+if data.get("admin_password") != "user-existing-secret":
+    raise SystemExit(
+        f"upgrade reset the user's password in {os.environ['CFG']}: got {data.get('admin_password')!r}")
+PY
+done
+TRIM_APPDEST="$KEEPW_DIR/app" TRIM_PKGVAR="$KEEPW_DIR/var" \
+TRIM_PKGETC="$KEEPW_DIR/etc" TRIM_PKGHOME="$KEEPW_DIR/home" \
+TRIM_PKGTMP="$KEEPW_DIR/tmp" TRIM_SERVICE_PORT="$KEEPW_PORT" \
+    bash "$KEEPW_DIR/main" stop >/dev/null 2>&1 || true
+rm -rf "$KEEPW_DIR"
+echo "upgrade keeps the user's existing password (wizard value ignored)"
 
 echo "both startup compatibility paths passed"

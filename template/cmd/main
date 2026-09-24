@@ -50,10 +50,13 @@ bootstrap_config() {
         echo "python3 is required to bootstrap the Wild Work config" >&2
         return 1
     fi
-    CFG_PATH="$cfg" PASSWORD_FILE="$password_file" BACKUP_TARGET="$backup_target" LISTEN_PORT="$PORT" python3 - <<'PY'
+    # WIZARD_ADMIN_PASSWORD：fnOS 把安装向导里 field=wizard_admin_password
+    # 的值以同名（大写）环境变量注入生命周期脚本。这里显式透传，长名转短名，
+    # 免得在 heredoc 里引用一个拼写不一致的变量。
+    CFG_PATH="$cfg" PASSWORD_FILE="$password_file" BACKUP_TARGET="$backup_target" \
+    LISTEN_PORT="$PORT" WIZARD_ADMIN_PASSWORD="${wizard_admin_password:-}" python3 - <<'PY'
 import json
 import os
-import secrets
 from pathlib import Path
 
 cfg = Path(os.environ["CFG_PATH"])
@@ -98,28 +101,49 @@ if not isinstance(listen.get("port"), int) or listen.get("port") != port:
     changed = True
 data["listen"] = {"host": listen["host"], "port": listen["port"]}
 
-# --- 2. admin_password：缺失即生成（全新安装与新升级都会走到这里）---
+# --- 2. admin_password：优先用安装向导里设的密码，其次保留既有值，最后用默认密码 ---
+# 优先级（顺序不能乱）：
+#   1) 已有 admin_password —— 升级路径。向导值绝不能覆盖它，否则用户升级后
+#      控制台密码被重置成安装时填的那个，属于静默改凭据。
+#   2) 安装向导填的 wizard_admin_password —— 全新安装，用户自己定密码。
+#   3) 都没有 —— 用默认密码 password。**刻意不用随机串**：随机密码意味着
+#      用户装完必须先找到 admin-password.txt 才能进控制台，多一道没必要的坎。
+#      默认密码在安装向导里已明确告知，装完直接用即可，登录后自行修改。
 password = data.get("admin_password")
-generated = not isinstance(password, str) or not password.strip()
-if generated:
-    password = secrets.token_urlsafe(32)
+had_password = isinstance(password, str) and bool(password.strip())
+wizard_password = os.environ.get("WIZARD_ADMIN_PASSWORD", "").strip()
+DEFAULT_PASSWORD = "password"
+if had_password:
+    source = "existing"
+elif wizard_password:
+    password = wizard_password
     data["admin_password"] = password
     changed = True
-    # 仅在改写既有配置时留回滚点（全新安装无旧内容可备）。
-    # 默认备份到 cfg 旁；调用方可用 BACKUP_TARGET 指定落点 —— start 里会传
-    # TRIM_PKGVAR 那本用户权威副本，让回滚点留在用户数据目录而不是每次升级
-    # 都会重新解包的 bin/ 里（后者升级后即失效，留着只会误导）。
-    backup_src = cfg
-    if os.environ.get("BACKUP_TARGET"):
-        candidate = Path(os.environ["BACKUP_TARGET"])
-        if candidate.exists():
-            backup_src = candidate
-    if backup_src.exists():
-        backup = backup_src.with_name(backup_src.name + ".pre-admin-auth.bak")
-        if not backup.exists():
-            import shutil
-            shutil.copy2(backup_src, backup)
-            os.chmod(backup, 0o600)
+    source = "wizard"
+else:
+    password = DEFAULT_PASSWORD
+    data["admin_password"] = password
+    changed = True
+    source = "default"
+
+# 回滚点：只要「即将改写一份已存在的配置」就要留 —— 判据是源文件存在，
+# **不是**「已有 admin_password」。旧版配置常常没有 admin_password，但带着
+# 用户的 api_key / 代理 / 签到时间；按 had_password 判断会让恰恰最该保护的
+# 那次升级不留回滚点（门禁断言就是这样红的）。
+# 默认备到 cfg 旁；调用方可用 BACKUP_TARGET 指定落点 —— start 里会传
+# TRIM_PKGVAR 那本用户权威副本，让回滚点留在用户数据目录，而不是每次升级
+# 都会重新解包的 bin/ 里（后者升级后即失效，留着只会误导）。
+backup_src = cfg
+if os.environ.get("BACKUP_TARGET"):
+    candidate = Path(os.environ["BACKUP_TARGET"])
+    if candidate.exists():
+        backup_src = candidate
+if backup_src.exists() and changed:
+    backup = backup_src.with_name(backup_src.name + ".pre-admin-auth.bak")
+    if not backup.exists():
+        import shutil
+        shutil.copy2(backup_src, backup)
+        os.chmod(backup, 0o600)
 
 if changed or not cfg.exists():
     tmp = cfg.with_name(cfg.name + f".tmp.{os.getpid()}")
@@ -143,7 +167,7 @@ os.chmod(tmp, 0o600)
 os.replace(tmp, password_file)
 
 print("wildwork config " + ("initialized" if changed else "already-current") +
-      "; admin password " + ("generated" if generated else "reused") +
+      "; admin password source=" + source +
       "; saved to " + str(password_file))
 PY
 }
