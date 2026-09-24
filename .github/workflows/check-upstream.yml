@@ -22,41 +22,57 @@ jobs:
           resp=$(curl -sf -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/rockswang/wild-work/releases/latest)
           tag=$(echo "$resp" | jq -r '.tag_name')
           url=$(echo "$resp" | jq -r '.html_url')
-          package_version="${tag#v}-1"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "package_version=$package_version" >> "$GITHUB_OUTPUT"
           echo "url=$url" >> "$GITHUB_OUTPUT"
-          echo "Upstream latest: $tag -> fnOS package v$package_version ($url)"
+          echo "Upstream latest: $tag ($url)"
 
-      - name: Check if the expected fnOS package already exists
+      - name: Decide whether to build (and which package revision)
         id: check
         run: |
           set -euo pipefail
           tag="${{ steps.upstream.outputs.tag }}"
-          package_version="${{ steps.upstream.outputs.package_version }}"
-          expected_asset="wildwork-${package_version}.fpk"
-          rel_json=$(curl -sS \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}")
-          rel_id=$(echo "$rel_json" | jq -r '.id // empty')
-          if [ -n "$rel_id" ]; then
-            expected_size=$(curl -sf \
-              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/${rel_id}/assets" \
-              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              | jq -r --arg n "$expected_asset" '.[] | select(.name==$n and .size>0) | .size')
-          else
-            expected_size=""
-          fi
-          if [ -n "$expected_size" ]; then
+          base="${tag#v}"
+          api="https://api.github.com/repos/${GITHUB_REPOSITORY}"
+          auth="Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}"
+
+          # 收集「某个 release tag」上所有 wildwork-<base>-N.fpk，输出其中的 N。
+          # 注意 tag 命名在历史上**不统一**，两种都要扫，不能猜：
+          #   - `v2.5.3`   ：挂在上游 tag 上的 release（自动流水线按此命名）
+          #   - `v2.5.3-3` ：独立 release tag（手工重打包时用过，带 v）
+          # 早期漏掉 `v` 前缀的写法会 404，静默判成「没构建」→ 反复重建。
+          max_n=""
+          consider_tag() {
+            local rel_tag="$1" got
+            got=$(curl -sS "$api/releases/tags/${rel_tag}" -H "$auth" 2>/dev/null \
+              | jq -r --arg p "wildwork-${base}-" \
+                  '.assets[]? | select(.name | startswith($p)) | .name' 2>/dev/null \
+              | sed -n "s/^wildwork-${base}-\([0-9]\+\)\.fpk$/\1/p" \
+              | sort -n | tail -1)
+            if [ -n "$got" ]; then
+              if [ -z "$max_n" ] || [ "$got" -gt "$max_n" ]; then
+                max_n="$got"
+                echo "  found wildwork-${base}-${got}.fpk on release tag ${rel_tag}"
+              fi
+            fi
+          }
+
+          consider_tag "$tag"        # 上游 tag 名（如 v2.5.3）
+          consider_tag "$base"       # 无 v 形态（如 2.5.3）
+          for n in $(seq 1 30); do
+            consider_tag "${tag}-${n}"   # 带 v 的独立 tag（如 v2.5.3-3）
+            consider_tag "${base}-${n}"  # 不带 v 的独立 tag
+          done
+
+          if [ -n "$max_n" ]; then
+            # 已有产物：判定「已构建」。这是**幂等**判定 —— 巡检每 2 小时跑，
+            # 不能每次都重建（重建还可能把修好的版本覆盖回旧内容）。
             echo "build=false" >> "$GITHUB_OUTPUT"
-            echo "Release $tag already carries $expected_asset (${expected_size} bytes)."
+            echo "package_version=${base}-${max_n}" >> "$GITHUB_OUTPUT"
+            echo "Upstream ${tag} already packaged as wildwork-${base}-${max_n}.fpk -> nothing to do"
           else
             echo "build=true" >> "$GITHUB_OUTPUT"
-            if [ -n "$rel_id" ]; then
-              echo "Release $tag exists but is missing $expected_asset; rebuilding."
-            else
-              echo "No Release for upstream $tag; building $expected_asset."
-            fi
+            echo "package_version=${base}-1" >> "$GITHUB_OUTPUT"
+            echo "No package for upstream ${tag} yet; will build wildwork-${base}-1.fpk"
           fi
 
       - name: Trigger build workflow
@@ -177,10 +193,15 @@ jobs:
 
           uploaded=""
           for attempt in 1 2 3 4 5; do
+            # ★ Content-Length 必须显式带上：实测不带它时上传流会被中间层改写，
+            #   文件静默损坏（7860260 → 7860244 字节），而 API 照样回 201、
+            #   state=uploaded，不报任何错。回读比对 size 是唯一的兜底。
+            fsize=$(stat -c%s "$fpk_file")
             resp=$(curl -sS -w '\n%{http_code}' -X POST \
               "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${rel_id}/assets?name=${fpk_file}" \
               -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
               -H "Content-Type: application/octet-stream" \
+              -H "Content-Length: ${fsize}" \
               --data-binary "@${fpk_file}") || true
             code=$(echo "$resp" | tail -1)
             echo "upload attempt $attempt -> HTTP $code"
@@ -224,25 +245,45 @@ jobs:
           set -uo pipefail
           tag="${{ steps.upstream.outputs.tag }}"
           [ -z "$tag" ] && exit 0
-          rel_json=$(curl -s \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}")
-          rel_id=$(echo "$rel_json" | jq -r '.id // empty')
-          if [ -z "$rel_id" ]; then
-            echo "No release for ${tag}; nothing to repair (build will create it)."
+          base="${tag#v}"
+          api="https://api.github.com/repos/${GITHUB_REPOSITORY}"
+          auth="Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}"
+
+          # 统计该上游 tag 名下到底有没有任何产物。
+          # tag 命名历史上不统一（`v2.5.3` 与 `v2.5.3-3` 都存在过），
+          # 所以两种形态都要扫 —— 只扫一种会把「其实已有包」误判成空壳、
+          # 进而反复重建（重建还可能覆盖掉修好的版本）。
+          found=""
+          check_tag() {
+            local rel_tag="$1" c
+            c=$(curl -sS "$api/releases/tags/${rel_tag}" -H "$auth" 2>/dev/null \
+              | jq -r --arg p "wildwork-${base}-" \
+                  '[.assets[]? | select(.name | startswith($p))] | length' 2>/dev/null)
+            if [ -n "$c" ] && [ "$c" != "0" ] && [ "$c" != "null" ]; then
+              echo "Package found on release tag ${rel_tag}: ${c} asset(s)"
+              found=1
+            fi
+          }
+          check_tag "$tag"
+          check_tag "$base"
+          for n in $(seq 1 30); do
+            [ -n "$found" ] && break
+            check_tag "${tag}-${n}"
+            check_tag "${base}-${n}"
+          done
+          if [ -n "$found" ]; then
+            echo "Upstream ${tag} already has a published package; nothing to repair."
             exit 0
           fi
-          count=$(curl -s \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/${rel_id}/assets" \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" | jq -r 'length')
-          echo "Release ${tag} (id=${rel_id}) asset count: ${count}"
-          if [ "$count" = "0" ]; then
-            echo "::warning::Release ${tag} exists but has NO assets - re-dispatching build to repair it"
-            curl -s -X POST \
-              "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/build-fpk.yml/dispatches" \
-              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              -H "Accept: application/vnd.github+json" \
-              -H "Content-Type: application/json" \
-              -d "{\"ref\":\"main\",\"inputs\":{\"version\":\"${tag}\",\"upstream_ref\":\"${tag}\"}}" \
-              -w 're-dispatch HTTP %{http_code}\n'
-          fi
+
+          echo "::warning::No package found for upstream ${tag} - re-dispatching build to create it"
+          # ★ version 必须是 <base>-1（带 -N 后缀），与 check 步骤判据一致。
+          #   早期这里传的是上游 tag 本身，build-fpk.sh 会产出 wildwork-<base>.fpk，
+          #   与判据 wildwork-<base>-1.fpk 永远对不上 → Repair 反复触发却永远修不好。
+          curl -s -X POST \
+            "$api/actions/workflows/build-fpk.yml/dispatches" \
+            -H "$auth" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            -d "{\"ref\":\"main\",\"inputs\":{\"version\":\"v${base}-1\",\"upstream_ref\":\"${tag}\"}}" \
+            -w 're-dispatch HTTP %{http_code}\n'

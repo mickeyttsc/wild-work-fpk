@@ -36,9 +36,11 @@ is_running() {
 #      "listen_host"/"listen_port" 上游完全不认，解析后 listen 为空 →
 #      IsLoopback()=false → 命中「非环回监听必须设 admin_password」的硬校验 →
 #      全新安装首次启动直接 fatal 退出。
-#   3. 因此全新安装也必须由我们显式生成合法 config（含随机 admin_password），
+#   3. 因此全新安装也必须由我们显式生成合法 config（含 admin_password），
 #      不能依赖上游「缺失即用默认值」的自愈逻辑——默认值是环回监听，
 #      网关桥接与局域网访问都会失效。
+#      密码取值优先级见下方第 2 节：向导填的 > 默认 password（非随机串，
+#      随机串会让用户装完翻不到密码、进不去控制台）。
 #
 # 参数：$1=配置文件路径  $2=密码说明文件路径  $3=可选，回滚点备份路径
 bootstrap_config() {
@@ -189,6 +191,55 @@ PY
     return 1
 }
 
+# 端口是否已被占用（含被别的程序占用）。
+# 用途：把「启动失败」细分成「端口冲突」与「其他原因」——前者用户自己
+# 换个端口就能解决，后者得看日志，两者混在一起会误导排查方向。
+#
+# ★ 用「查监听表」而不是「尝试 connect」：
+#   connect 能否成功取决于对方 accept 的意愿（backlog 满 / 只 bind 不 listen
+#   都会拒绝），实测会漏判。监听表是内核事实，不看对端行为。
+port_in_use() {
+    local listing=""
+    if command -v ss >/dev/null 2>&1; then
+        listing=$(ss -ltn 2>/dev/null | awk 'NR>1 {print $4}')
+    elif command -v netstat >/dev/null 2>&1; then
+        listing=$(netstat -ltn 2>/dev/null | awk 'NR>2 {print $4}')
+    fi
+    if [ -n "$listing" ]; then
+        # 匹配 :PORT 结尾（0.0.0.0:7863 / *:7863 / [::]:7863 都覆盖）
+        if printf '%s\n' "$listing" | grep -qE "[:.]${PORT}\$"; then
+            return 0
+        fi
+        return 1
+    fi
+    # 没有 ss/netstat 时的退路：仍用 connect 探测（可能漏判，但不至于误报）
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "$PORT" <<'PY' >/dev/null 2>&1
+import socket, sys
+port = int(sys.argv[1])
+for probe in (("0.0.0.0", port), ("127.0.0.1", port)):
+    s = socket.socket()
+    s.settimeout(1)
+    try:
+        s.connect(probe)
+        s.close()
+        raise SystemExit(0)
+    except SystemExit:
+        raise
+    except OSError:
+        pass
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+raise SystemExit(1)
+PY
+        return $?
+    fi
+    return 1
+}
+
 bridge_running() {
     [ -x "$BRIDGE_BIN" ] || return 0
     if [ -f "$BRIDGE_PID_FILE" ]; then
@@ -244,13 +295,25 @@ case "$1" in
         #      以它存在为条件会让播种被整段跳过，用户设置（api_key / 代理 /
         #      签到时间等）随升级丢失（实测回归断言就是这样红的）。
         #      只有全新安装（PKGVAR 与 PKGHOME 都无配置）才保留包内模板做初始播种。
-        #   2. 再由 bin/ 那份统一引导（迁移旧 listen_host/listen_port、补随机
+        #   2. 再由 bin/ 那份统一引导（迁移旧 listen_host/listen_port、补默认
         #      admin_password），保证上游读到的形状一定合法。
+        #
+        # ★ 必须区分「没有用户配置」与「有配置但拷贝失败」：
+        #   早期写成 `cp ... && seeded=$src`，cp 失败时 seeded 为空 →
+        #   被当成全新安装 → 用包内干净模板覆盖 → 用户配置静默丢失。
+        #   跨卷（@appdata → @appcenter 可能不同存储池）拷贝失败并非不可能，
+        #   所以拷贝失败要直接 fatal，不能降级。
         seeded=""
         for src in "$TRIM_PKGVAR/config.json" "$TRIM_PKGHOME/config.json"; do
             if [ -f "$src" ]; then
-                cp -f "$src" "$TRIM_APPDEST/bin/config.json" 2>/dev/null && seeded="$src"
-                [ -n "$seeded" ] && break
+                if cp -f "$src" "$TRIM_APPDEST/bin/config.json" 2>/dev/null; then
+                    seeded="$src"
+                else
+                    echo "wild-work: FATAL 无法把用户配置 $src 拷贝到 $TRIM_APPDEST/bin/config.json（跨卷？权限？）" \
+                        > "$TRIM_TEMP_LOGFILE" 2>/dev/null
+                    exit 1
+                fi
+                break
             fi
         done
         if [ -n "$seeded" ]; then
@@ -282,7 +345,16 @@ case "$1" in
             sleep 1
             if ! is_running; then
                 rm -f "$PID_FILE"
-                echo "wild-work exited during startup, see $LOG_FILE" > "$TRIM_TEMP_LOGFILE" 2>/dev/null
+                # 进程早退时给出可诊断的原因：最常见的是端口被别的程序占用
+                # （上游探测到绑定失败会自己退出）。若只报「启动失败」，
+                # 用户会以为应用坏了，实际是端口冲突 —— 这两者处置完全不同。
+                if port_in_use; then
+                    echo "Wild Work 启动失败：端口 $PORT 已被其他程序占用。请在应用设置中改用其他端口，或停掉占用该端口的程序。" \
+                        > "$TRIM_TEMP_LOGFILE" 2>/dev/null
+                else
+                    echo "Wild Work 启动失败（进程提前退出），详见 $LOG_FILE" \
+                        > "$TRIM_TEMP_LOGFILE" 2>/dev/null
+                fi
                 exit 1
             fi
             if service_ready; then
@@ -293,7 +365,13 @@ case "$1" in
         if [ "$ready" != "1" ]; then
             kill "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null || true
             rm -f "$PID_FILE"
-            echo "wild-work did not become ready on port $PORT, see $LOG_FILE" > "$TRIM_TEMP_LOGFILE" 2>/dev/null
+            if port_in_use; then
+                echo "Wild Work 启动失败：端口 $PORT 已被其他程序占用。" \
+                    > "$TRIM_TEMP_LOGFILE" 2>/dev/null
+            else
+                echo "Wild Work 在端口 $PORT 上未就绪（超时），详见 $LOG_FILE" \
+                    > "$TRIM_TEMP_LOGFILE" 2>/dev/null
+            fi
             exit 1
         fi
         start_bridge

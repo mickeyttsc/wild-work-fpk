@@ -3,9 +3,9 @@
     "stepTitle": "设置控制台管理密码",
     "items": [
       { "type": "tips", "helpText": "Wild Work 控制台需要密码才能访问（它把多个 IDE 账号聚合成一个 OpenAI 兼容接口，涉及你的账号，所以默认开启鉴权）。" },
-      { "type": "tips", "helpText": "⚠️ 留空不填 = 使用默认密码 password。装完直接用它登录控制台即可，登录后请尽快修改成自己的密码。" },
-      { "type": "tips", "helpText": "也可以在这里直接设一个自己的密码（至少 8 位）。设了就用你填的，不会用默认值。" },
-      { "type": "tips", "helpText": "密码记录在应用数据目录的 admin-password.txt 里，忘了可以去那里查看。" },
+      { "type": "tips", "helpText": "⚠️ 留空不填 = 使用默认密码 password。装完打开『Wild Work』图标，密码框输入 password 即可进入控制台。" },
+      { "type": "tips", "helpText": "也可以在这里直接设一个自己的密码（8–128 位）。设了就用你填的，不会用默认值。" },
+      { "type": "tips", "helpText": "密码同时存放在应用的『数据目录』下的 admin-password.txt（应用中心里可查看/打开该应用的数据目录），忘了可去那里查看。" },
       { "type": "tips", "helpText": "提醒：控制台登录连续输错 5 次会锁定该来源 IP 5 分钟，请确认密码后再提交。" },
       {
         "type": "password",
@@ -13,8 +13,7 @@
         "label": "管理密码（留空则使用默认密码 password）",
         "initValue": "",
         "rules": [
-          { "min": 8, "message": "密码至少 8 位（留空则使用默认密码 password）" },
-          { "max": 128, "message": "密码最长 128 位" }
+          { "pattern": "^(|.{8,128})$", "message": "密码需为 8–128 位；留空则使用默认密码 password" }
         ]
       }
     ]

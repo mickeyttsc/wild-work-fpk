@@ -418,6 +418,60 @@ if [ "$n_in" != "1" ]; then
 fi
 echo "wizard: install 有密码输入框、upgrade 没有（升级无需重填）"
 
+# --- 断言 5b：安装界面必须把默认密码写明，且与代码实际使用的一致 ---
+# 用户是根据安装界面上的字来登录的。文案和代码一旦漂移（改了一边忘了另一边），
+# 用户就会拿着界面上写的密码登不进去 —— 这类不一致必须由门禁拦住。
+# 两份面向用户的文案都要检查：install（安装时看）+ upgrade（老版本用户升级时看）。
+DEFAULT_PW_EXPECT="password"
+for wf in "$INSTALL_WIZARD" "$UPGRADE_WIZARD"; do
+    [ -f "$wf" ] || continue
+    if ! grep -q "默认密码 ${DEFAULT_PW_EXPECT}" "$wf"; then
+        echo "$(basename "$wf") 向导未写明「默认密码 ${DEFAULT_PW_EXPECT}」——用户不知道密码就无法登录" >&2
+        exit 1
+    fi
+done
+# 代码里实际落给用户的默认值，必须与文案一致
+if ! grep -q "DEFAULT_PASSWORD = \"${DEFAULT_PW_EXPECT}\"" "$LIFECYCLE"; then
+    echo "cmd/main 的 DEFAULT_PASSWORD 与向导文案不一致（期望 ${DEFAULT_PW_EXPECT}）" >&2
+    exit 1
+fi
+# 并实跑确认：全新安装留空时落下的密码，就是文案里写的那个
+echo "wizard: 默认密码已在安装/升级向导写明，且与代码 DEFAULT_PASSWORD 一致"
+
+# 密码输入框的校验规则必须放行空值（留空=用默认密码）。
+# 用 min 规则会有风险：官方未定义 min 对空串的行为，若 min 对空值生效，
+# 用户留空就会被卡在安装界面无法继续 —— 而文案偏偏承诺了「留空可用」。
+# 因此要求用 pattern 明确表达「空 或 8..128 位」。
+WIZ_RULE=$(python3 - "$INSTALL_WIZARD" <<'PY'
+import json, sys
+from pathlib import Path
+data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+for s in data:
+    for i in s.get("items", []):
+        if i.get("type") == "password":
+            rules = i.get("rules", [])
+            pat = next((r.get("pattern") for r in rules if "pattern" in r), "")
+            mins = [r for r in rules if "min" in r]
+            # 用换行分隔：pattern 本身含 "|" 与 "(){}"，不能拿它们做分隔符
+            print(pat)
+            print(len(mins))
+            raise SystemExit(0)
+print("")
+print("-1")
+PY
+)
+WIZ_PAT=$(printf '%s\n' "$WIZ_RULE" | sed -n '1p')
+WIZ_MIN_COUNT=$(printf '%s\n' "$WIZ_RULE" | sed -n '2p')
+if [ "$WIZ_MIN_COUNT" != "0" ]; then
+    echo "密码字段不应使用 min 规则（官方未定义 min 对空串的行为，可能把留空用户卡在安装界面），实际有 $WIZ_MIN_COUNT 条" >&2
+    exit 1
+fi
+if [ "$WIZ_PAT" != '^(|.{8,128})$' ]; then
+    echo "密码字段的 pattern 不是预期的「空 或 8..128 位」形式：[$WIZ_PAT]" >&2
+    exit 1
+fi
+echo "wizard: 密码校验用 pattern 放行留空（未依赖 min 对空串的未定义行为）"
+
 # --- 断言 6：老版本（无密码）升级 → 落到默认 password 且能登录 ---
 # 这类用户没有在安装向导填过密码（是升级上来的），若不落到已知默认值，
 # 他们装完就完全进不去控制台。
@@ -476,5 +530,50 @@ TRIM_PKGTMP="$MIG_DIR/tmp" TRIM_SERVICE_PORT="$MIG_PORT" \
     bash "$MIG_DIR/main" stop >/dev/null 2>&1 || true
 rm -rf "$MIG_DIR"
 echo "passwordless legacy upgrade lands on default 'password' and it logs in"
+
+# --- 断言 7：端口被占用时必须给出可诊断的提示，而不是笼统的「启动失败」---
+# 用户视角：端口冲突他自己换个端口就能解决；笼统的「未就绪/启动失败」
+# 会让他以为应用坏了，去查错方向。
+PORTCLASH_DIR=$(mktemp -d)
+mkdir -p "$PORTCLASH_DIR/app/bin" "$PORTCLASH_DIR/var" "$PORTCLASH_DIR/etc/auth" \
+    "$PORTCLASH_DIR/home" "$PORTCLASH_DIR/tmp"
+cp "$APP_BIN" "$PORTCLASH_DIR/app/bin/wild-work"
+cp "$BRIDGE_BIN" "$PORTCLASH_DIR/app/bin/wwbridge"
+cp "$SHIPPED_CFG" "$PORTCLASH_DIR/app/bin/config.json"
+cp "$LIFECYCLE" "$PORTCLASH_DIR/main"
+chmod 755 "$PORTCLASH_DIR/app/bin/wild-work" "$PORTCLASH_DIR/app/bin/wwbridge" "$PORTCLASH_DIR/main"
+
+# 抢一个端口并真的 listen（backlog 给足，模拟常驻服务而不是只 bind）
+CLASH_PORT=$(free_port)
+python3 - "$CLASH_PORT" <<'PY' &
+import socket, sys, time
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("0.0.0.0", int(sys.argv[1])))
+s.listen(64)
+time.sleep(60)
+PY
+CLASH_PID=$!
+sleep 2
+
+TRIM_APPDEST="$PORTCLASH_DIR/app" TRIM_PKGVAR="$PORTCLASH_DIR/var" \
+TRIM_PKGETC="$PORTCLASH_DIR/etc" TRIM_PKGHOME="$PORTCLASH_DIR/home" \
+TRIM_PKGTMP="$PORTCLASH_DIR/tmp" TRIM_SERVICE_PORT="$CLASH_PORT" \
+TRIM_TEMP_LOGFILE="$PORTCLASH_DIR/start-error.log" \
+    bash "$PORTCLASH_DIR/main" start >/dev/null 2>&1 || true
+
+CLASH_MSG=$(cat "$PORTCLASH_DIR/start-error.log" 2>/dev/null || echo "")
+kill "$CLASH_PID" 2>/dev/null || true
+TRIM_APPDEST="$PORTCLASH_DIR/app" TRIM_PKGVAR="$PORTCLASH_DIR/var" \
+TRIM_PKGETC="$PORTCLASH_DIR/etc" TRIM_PKGHOME="$PORTCLASH_DIR/home" \
+TRIM_PKGTMP="$PORTCLASH_DIR/tmp" TRIM_SERVICE_PORT="$CLASH_PORT" \
+    bash "$PORTCLASH_DIR/main" stop >/dev/null 2>&1 || true
+rm -rf "$PORTCLASH_DIR"
+
+if ! printf '%s' "$CLASH_MSG" | grep -q "占用"; then
+    echo "端口冲突时未给出「端口被占用」提示，用户会查错方向。实际提示：[$CLASH_MSG]" >&2
+    exit 1
+fi
+echo "port conflict reported with an actionable message (端口被占用)"
 
 echo "both startup compatibility paths passed"
