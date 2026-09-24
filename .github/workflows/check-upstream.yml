@@ -22,48 +22,67 @@ jobs:
           resp=$(curl -sf -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/rockswang/wild-work/releases/latest)
           tag=$(echo "$resp" | jq -r '.tag_name')
           url=$(echo "$resp" | jq -r '.html_url')
-          echo "tag=$tag"  >> "$GITHUB_OUTPUT"
-          echo "url=$url"  >> "$GITHUB_OUTPUT"
-          echo "Upstream latest: $tag ($url)"
+          package_version="${tag#v}-1"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "package_version=$package_version" >> "$GITHUB_OUTPUT"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "Upstream latest: $tag -> fnOS package v$package_version ($url)"
 
-      - name: Check if we already built this version
+      - name: Check if the expected fnOS package already exists
         id: check
         run: |
+          set -euo pipefail
           tag="${{ steps.upstream.outputs.tag }}"
-          code=$(curl -s -o /dev/null -w "%{http_code}" \
+          package_version="${{ steps.upstream.outputs.package_version }}"
+          expected_asset="wildwork-${package_version}.fpk"
+          rel_json=$(curl -sS \
             "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}")
-          echo "Existing release lookup HTTP: $code"
-          if [ "$code" = "200" ]; then
+          rel_id=$(echo "$rel_json" | jq -r '.id // empty')
+          if [ -n "$rel_id" ]; then
+            expected_size=$(curl -sf \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/${rel_id}/assets" \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              | jq -r --arg n "$expected_asset" '.[] | select(.name==$n and .size>0) | .size')
+          else
+            expected_size=""
+          fi
+          if [ -n "$expected_size" ]; then
             echo "build=false" >> "$GITHUB_OUTPUT"
-            echo "v${tag} already built, nothing to do."
+            echo "Release $tag already carries $expected_asset (${expected_size} bytes)."
           else
             echo "build=true" >> "$GITHUB_OUTPUT"
-            echo "New upstream version detected: ${tag}"
+            if [ -n "$rel_id" ]; then
+              echo "Release $tag exists but is missing $expected_asset; rebuilding."
+            else
+              echo "No Release for upstream $tag; building $expected_asset."
+            fi
           fi
 
       - name: Trigger build workflow
         if: steps.check.outputs.build == 'true'
         run: |
           tag="${{ steps.upstream.outputs.tag }}"
+          package_version="${{ steps.upstream.outputs.package_version }}"
           code=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
             "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/build-fpk.yml/dispatches" \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github+json" \
             -H "Content-Type: application/json" \
-            -d "{\"ref\":\"main\",\"inputs\":{\"version\":\"${tag}\",\"upstream_ref\":\"${tag}\"}}")
+            -d "{\"ref\":\"main\",\"inputs\":{\"version\":\"v${package_version}\",\"upstream_ref\":\"${tag}\"}}")
           if [ "$code" != "204" ]; then
             echo "::error::Build dispatch failed (HTTP $code)"
             exit 1
           fi
-          echo "Build dispatched for ${tag}"
+          echo "Build dispatched: upstream ${tag} -> v${package_version}"
 
       - name: Wait for build result and create Release
         if: steps.check.outputs.build == 'true'
         run: |
           set -euo pipefail
           tag="${{ steps.upstream.outputs.tag }}"
-          echo "Waiting for build of ${tag} to finish..."
+          package_version="${{ steps.upstream.outputs.package_version }}"
+          echo "Waiting for build of ${tag} -> v${package_version} to finish..."
 
           # 轮询最新一次 run（由上面的 dispatch 触发），最长 10 分钟
           conclusion=""
@@ -102,72 +121,81 @@ jobs:
           unzip -o artifact.zip
           ls -la *.fpk
 
-          fpk_file=$(ls wildwork-*.fpk | head -1)
+          fpk_file=$(ls "wildwork-${package_version}.fpk" 2>/dev/null || true)
           if [ -z "$fpk_file" ]; then
-            echo "::error::artifact zip contained no wildwork-*.fpk"
+            echo "::error::artifact zip did not contain expected wildwork-${package_version}.fpk"
+            ls -la ./*.fpk 2>/dev/null || true
             exit 1
           fi
           SHA=$(sha256sum "$fpk_file" | cut -d' ' -f1)
           echo "FPK: $fpk_file  sha256=$SHA"
 
-          # ★ 幂等：若该 tag 的 release 已存在（可能是上次只建了空壳），直接复用
+          # ★ 幂等：若该上游 tag 的 release 已存在（可能是上次只建了空壳或只有旧包装），直接复用；
+          #   build-fpk.yml 只负责 artifact，不负责发布，所以这里必须自己创建/复用 Release。
           rel_json=$(curl -s \
             "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}")
           rel_id=$(echo "$rel_json" | jq -r '.id // empty')
           if [ -z "$rel_id" ]; then
-            body=$(printf '{"tag_name":"%s","name":"Wild Work FPK %s","body":"自动构建于上游 %s (rockswang/wild-work releases)。下载 wildwork-*.fpk 在飞牛 fnOS 应用中心手动安装。","draft":false,"prerelease":false}' "$tag" "$tag" "$tag")
-            resp=$(curl -s -w '\n%{http_code}' -X POST \
+            body=$(printf '{"tag_name":"%s","name":"Wild Work FPK %s","body":"自动构建于上游 %s (rockswang/wild-work releases)。下载 wildwork-%s.fpk 在飞牛 fnOS 应用中心手动安装。","draft":false,"prerelease":false}' \
+              "$tag" "$tag" "$tag" "$package_version")
+            resp=$(curl -sS -w '\n%{http_code}' -X POST \
               "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases" \
               -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
               -H "Accept: application/vnd.github+json" \
               -d "$body")
             code=$(echo "$resp" | tail -1)
-            echo "create release HTTP $code"
-            if [ "$code" != "201" ] && [ "$code" != "200" ]; then
-              echo "$resp" | head -n -1
+            if [ "$code" != "201" ]; then
               echo "::error::create release failed (HTTP $code)"
+              echo "$resp" | head -n -1
               exit 1
             fi
             rel_id=$(echo "$resp" | head -n -1 | jq -r '.id')
           else
             echo "Release ${tag} already exists (id=$rel_id), reusing it"
           fi
+          [ -n "$rel_id" ] || { echo "::error::Release $tag has no id"; exit 1; }
 
-          # 检查是否已经有同名 asset，避免重复上传（422）
-          existing=$(curl -s \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/${rel_id}/assets" \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            | jq -r --arg n "$fpk_file" '.[] | select(.name==$n) | .browser_download_url')
-          if [ -n "$existing" ]; then
-            echo "Asset already uploaded: $existing"
+          if [ -n "$rel_id" ]; then
+            existing_asset=$(curl -s \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/${rel_id}/assets" \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              | jq -r --arg n "$fpk_file" '.[] | select(.name==$n) | .id')
           else
-            # ★ 上传必须重试：uploads.github.com 对刚创建的 release 偶发 5xx/超时，
-            #   且 curl -sf 失败是静默的（管道到 jq 会吞掉 exit code），
-            #   历史事故：release 建好了、附件没传上去，脚本照样 echo "Release ready"，
-            #   之后 check 步骤见 release 已存在就永远不再重试 → 永久空 release。
-            uploaded=""
-            for attempt in 1 2 3 4 5; do
-              resp=$(curl -sS -w '\n%{http_code}' -X POST \
-                "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${rel_id}/assets?name=${fpk_file}" \
-                -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-                -H "Content-Type: application/octet-stream" \
-                --data-binary "@${fpk_file}") || true
-              code=$(echo "$resp" | tail -1)
-              echo "upload attempt $attempt -> HTTP $code"
-              if [ "$code" = "201" ]; then
-                uploaded=$(echo "$resp" | head -n -1 | jq -r '.browser_download_url')
-                break
-              fi
-              echo "$resp" | head -n -1 | head -c 800; echo
-              sleep $((attempt * 10))
-            done
-            if [ -z "$uploaded" ] || [ "$uploaded" = "null" ]; then
-              echo "::error::asset upload failed after 5 attempts for ${tag}"
+            existing_asset=""
+          fi
+          if [ -n "$existing_asset" ]; then
+            echo "::warning::Deleting stale asset ${existing_asset} before replacing ${fpk_file}"
+            delete_code=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/assets/${existing_asset}" \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}")
+            if [ "$delete_code" != "204" ] && [ "$delete_code" != "404" ]; then
+              echo "::error::delete stale asset failed (HTTP $delete_code)"
               exit 1
             fi
-            echo "Uploaded: $uploaded"
           fi
+
+          uploaded=""
+          for attempt in 1 2 3 4 5; do
+            resp=$(curl -sS -w '\n%{http_code}' -X POST \
+              "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${rel_id}/assets?name=${fpk_file}" \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary "@${fpk_file}") || true
+            code=$(echo "$resp" | tail -1)
+            echo "upload attempt $attempt -> HTTP $code"
+            if [ "$code" = "201" ]; then
+              uploaded=$(echo "$resp" | head -n -1 | jq -r '.browser_download_url')
+              break
+            fi
+            echo "$resp" | head -n -1 | head -c 800; echo
+            sleep $((attempt * 10))
+          done
+          if [ -z "$uploaded" ] || [ "$uploaded" = "null" ]; then
+            echo "::error::asset upload failed after 5 attempts for ${tag}"
+            exit 1
+          fi
+          echo "Uploaded: $uploaded"
 
           # ★ 回读校验：附件必须真的在 release 上（这是唯一可信判据）
           final=$(curl -s \

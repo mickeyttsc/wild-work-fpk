@@ -22,23 +22,157 @@ is_running() {
 }
 
 # v2.0.4: 统一绑 0.0.0.0（局域网 / VPN / 本机网关桥接 多通路都能连）
-patch_cfg() {
+# 监听地址落盘已由 bootstrap_config 统一处理（迁移旧 listen_host/listen_port 写法
+# 并补齐 admin_password）。不再用 sed 拼 JSON——旧实现会写出上游不认识的字段，
+# 导致全新安装首次启动直接 fatal。
+
+# v2.1.0: 统一的配置引导，同时覆盖「全新安装」与「旧版升级」两条路径。
+#
+# 为什么必须重写（实测坑）：
+#   1. 上游 2.5.3 的 workDir() 会 chdir 到**可执行文件所在目录**（bin/），
+#      二进制真正读取的是 bin/config.json —— 不是 TRIM_PKGVAR 下那份。
+#      所以每一份都得写成上游认识的形状。
+#   2. 上游只认 "listen": {"host","port"}；老模板 bin-config.json 里写的
+#      "listen_host"/"listen_port" 上游完全不认，解析后 listen 为空 →
+#      IsLoopback()=false → 命中「非环回监听必须设 admin_password」的硬校验 →
+#      全新安装首次启动直接 fatal 退出。
+#   3. 因此全新安装也必须由我们显式生成合法 config（含随机 admin_password），
+#      不能依赖上游「缺失即用默认值」的自愈逻辑——默认值是环回监听，
+#      网关桥接与局域网访问都会失效。
+#
+# 参数：$1=配置文件路径  $2=密码说明文件路径  $3=可选，回滚点备份路径
+bootstrap_config() {
     cfg="$1"
-    if [ ! -f "$cfg" ]; then
-        printf '{\n  "listen_host": "0.0.0.0",\n  "listen_port": %s\n}\n' "$PORT" > "$cfg" 2>/dev/null || return 0
-        return 0
+    password_file="$2"
+    backup_target="${3:-}"
+    mkdir -p "$(dirname "$cfg")" 2>/dev/null
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "python3 is required to bootstrap the Wild Work config" >&2
+        return 1
     fi
-    if grep -q '"listen_host"' "$cfg" 2>/dev/null; then
-        sed -i 's/"listen_host"[[:space:]]*:[[:space:]]*"[^"]*"/"listen_host": "0.0.0.0"/' "$cfg" 2>/dev/null || true
-    else
-        sed -i '0,/{/s//{\n  "listen_host": "0.0.0.0",/' "$cfg" 2>/dev/null || true
+    CFG_PATH="$cfg" PASSWORD_FILE="$password_file" BACKUP_TARGET="$backup_target" LISTEN_PORT="$PORT" python3 - <<'PY'
+import json
+import os
+import secrets
+from pathlib import Path
+
+cfg = Path(os.environ["CFG_PATH"])
+password_file = Path(os.environ["PASSWORD_FILE"])
+port = int(os.environ["LISTEN_PORT"])
+
+# 读现有配置（全新安装时不存在 → 空字典）
+if cfg.exists():
+    try:
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        raise SystemExit(f"existing config is not valid JSON: {cfg}: {exc}")
+    if not isinstance(data, dict):
+        raise SystemExit(f"config root must be a JSON object: {cfg}")
+else:
+    data = {}
+
+changed = False
+
+# --- 1. listen：迁移旧字段写法，统一成上游认识的 {"host","port"} ---
+listen = data.get("listen")
+legacy_host = data.pop("listen_host", None)
+legacy_port = data.pop("listen_port", None)
+if legacy_host is not None or legacy_port is not None:
+    changed = True
+
+if not isinstance(listen, dict):
+    # 兼容字符串形式 "0.0.0.0:7863" / ":7863"
+    if isinstance(listen, str) and listen.strip():
+        host, _, port_str = listen.rpartition(":")
+        listen = {"host": host, "port": int(port_str) if port_str.isdigit() else port}
+    else:
+        listen = {}
+    changed = True
+
+# 统一绑 0.0.0.0：局域网 / VPN / 本机网关桥接多通路都要能连
+if str(listen.get("host", "")).strip() != "0.0.0.0":
+    listen["host"] = "0.0.0.0"
+    changed = True
+if not isinstance(listen.get("port"), int) or listen.get("port") != port:
+    listen["port"] = port
+    changed = True
+data["listen"] = {"host": listen["host"], "port": listen["port"]}
+
+# --- 2. admin_password：缺失即生成（全新安装与新升级都会走到这里）---
+password = data.get("admin_password")
+generated = not isinstance(password, str) or not password.strip()
+if generated:
+    password = secrets.token_urlsafe(32)
+    data["admin_password"] = password
+    changed = True
+    # 仅在改写既有配置时留回滚点（全新安装无旧内容可备）。
+    # 默认备份到 cfg 旁；调用方可用 BACKUP_TARGET 指定落点 —— start 里会传
+    # TRIM_PKGVAR 那本用户权威副本，让回滚点留在用户数据目录而不是每次升级
+    # 都会重新解包的 bin/ 里（后者升级后即失效，留着只会误导）。
+    backup_src = cfg
+    if os.environ.get("BACKUP_TARGET"):
+        candidate = Path(os.environ["BACKUP_TARGET"])
+        if candidate.exists():
+            backup_src = candidate
+    if backup_src.exists():
+        backup = backup_src.with_name(backup_src.name + ".pre-admin-auth.bak")
+        if not backup.exists():
+            import shutil
+            shutil.copy2(backup_src, backup)
+            os.chmod(backup, 0o600)
+
+if changed or not cfg.exists():
+    tmp = cfg.with_name(cfg.name + f".tmp.{os.getpid()}")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, cfg)
+os.chmod(cfg, 0o600)
+
+# --- 3. 密码说明文件：始终写权威值，权限 600 ---
+password_file.parent.mkdir(parents=True, exist_ok=True)
+tmp = password_file.with_name(password_file.name + f".tmp.{os.getpid()}")
+with open(tmp, "w", encoding="utf-8") as f:
+    f.write(password.strip() + "\n")
+    f.flush()
+    os.fsync(f.fileno())
+os.chmod(tmp, 0o600)
+os.replace(tmp, password_file)
+
+print("wildwork config " + ("initialized" if changed else "already-current") +
+      "; admin password " + ("generated" if generated else "reused") +
+      "; saved to " + str(password_file))
+PY
+}
+
+service_ready() {
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsS --max-time 2 "http://127.0.0.1:${PORT}/api/auth/state" >/dev/null 2>&1
+        return $?
     fi
-    if grep -q '"listen_port"' "$cfg" 2>/dev/null; then
-        sed -i "s/\"listen_port\"[[:space:]]*:[[:space:]]*[0-9][0-9]*/\"listen_port\": $PORT/" "$cfg" 2>/dev/null || true
-        sed -i "s/\"listen_port\"[[:space:]]*:[[:space:]]*\"[0-9]*\"/\"listen_port\": $PORT/" "$cfg" 2>/dev/null || true
-    else
-        sed -i "0,/{/s//{\\n  \"listen_port\": $PORT,/" "$cfg" 2>/dev/null || true
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "$PORT" <<'PY' >/dev/null 2>&1
+import socket
+import sys
+s = socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=2)
+s.close()
+PY
+        return $?
     fi
+    return 1
+}
+
+bridge_running() {
+    [ -x "$BRIDGE_BIN" ] || return 0
+    if [ -f "$BRIDGE_PID_FILE" ]; then
+        bpid=$(cat "$BRIDGE_PID_FILE" 2>/dev/null)
+        [ -n "$bpid" ] && kill -0 "$bpid" 2>/dev/null
+        return $?
+    fi
+    return 1
 }
 
 # v2.0.8: 探测局域网 IP（仅供控制台"OpenAI接口"显示用，绑定仍为 0.0.0.0）
@@ -74,9 +208,44 @@ case "$1" in
             exit 0
         fi
         mkdir -p "$TRIM_PKGVAR" "$TRIM_PKGETC/auth" "$TRIM_PKGHOME" "$TRIM_PKGTMP"
-        patch_cfg "$TRIM_PKGVAR/config.json"
-        patch_cfg "$TRIM_PKGHOME/config.json"
-        cp -f "$TRIM_PKGVAR/config.json" "$TRIM_APPDEST/bin/config.json" 2>/dev/null || true
+        # 三份配置都要引导，缺一不可：
+        #   TRIM_APPDEST/bin/config.json —— 上游 workDir() 实际读取的那份（决定能否启动）
+        #   TRIM_PKGVAR/config.json     —— 生命周期与备份的权威副本
+        #   TRIM_PKGHOME/config.json    —— HOME 维度副本
+        #
+        # 顺序很关键（升级时会踩坑）：
+        #   1. 先给 bin/config.json 播种「用户现有配置」。判据是 PKGVAR / PKGHOME
+        #      里**有没有**用户配置，**不是** bin/config.json 存不存在 ——
+        #      升级时 TRIM_APPDEST 是新解包的目录，包内那份干净模板本来就在，
+        #      以它存在为条件会让播种被整段跳过，用户设置（api_key / 代理 /
+        #      签到时间等）随升级丢失（实测回归断言就是这样红的）。
+        #      只有全新安装（PKGVAR 与 PKGHOME 都无配置）才保留包内模板做初始播种。
+        #   2. 再由 bin/ 那份统一引导（迁移旧 listen_host/listen_port、补随机
+        #      admin_password），保证上游读到的形状一定合法。
+        seeded=""
+        for src in "$TRIM_PKGVAR/config.json" "$TRIM_PKGHOME/config.json"; do
+            if [ -f "$src" ]; then
+                cp -f "$src" "$TRIM_APPDEST/bin/config.json" 2>/dev/null && seeded="$src"
+                [ -n "$seeded" ] && break
+            fi
+        done
+        if [ -n "$seeded" ]; then
+            echo "wild-work: seeded bin/config.json from $seeded"
+        else
+            echo "wild-work: fresh install, using packaged bin/config.json as seed"
+        fi
+        # 回滚点：TRIM_PKGVAR/config.json 是用户权威副本，下面会被覆盖。
+        # 把它的旧内容交给 bootstrap_config 做备份（落点 var/config.json.pre-admin-auth.bak），
+        # 而不是让备份留在 bin/ —— 那是每次升级都重新解包的临时目录，
+        # 升完即失效，用户拿不到能救命的回滚点。
+        bootstrap_config "$TRIM_APPDEST/bin/config.json" "$TRIM_PKGHOME/admin-password.txt" \
+            "$TRIM_PKGVAR/config.json" || {
+            echo "wild-work config bootstrap failed, see $LOG_FILE" > "$TRIM_TEMP_LOGFILE" 2>/dev/null
+            exit 1
+        }
+        cp -f "$TRIM_APPDEST/bin/config.json" "$TRIM_PKGVAR/config.json" 2>/dev/null || true
+        cp -f "$TRIM_APPDEST/bin/config.json" "$TRIM_PKGHOME/config.json" 2>/dev/null || true
+        chmod 600 "$TRIM_APPDEST/bin/config.json" "$TRIM_PKGVAR/config.json" "$TRIM_PKGHOME/config.json" 2>/dev/null || true
         export WILDWORK_LISTEN="0.0.0.0:$PORT"
         export WILDWORK_STATE_FILE="$TRIM_PKGVAR/state"
         export WILDWORK_AUTH_DIR="$TRIM_PKGETC/auth"
@@ -84,14 +253,34 @@ case "$1" in
         cd "$TRIM_PKGVAR" || exit 1
         nohup "$APP_BIN" --no-tray >> "$LOG_FILE" 2>&1 &
         echo $! > "$PID_FILE"
-        for i in 1 2 3 4 5; do
+        ready=0
+        for i in 1 2 3 4 5 6 7 8 9 10; do
             sleep 1
             if ! is_running; then
+                rm -f "$PID_FILE"
                 echo "wild-work exited during startup, see $LOG_FILE" > "$TRIM_TEMP_LOGFILE" 2>/dev/null
                 exit 1
             fi
+            if service_ready; then
+                ready=1
+                break
+            fi
         done
+        if [ "$ready" != "1" ]; then
+            kill "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null || true
+            rm -f "$PID_FILE"
+            echo "wild-work did not become ready on port $PORT, see $LOG_FILE" > "$TRIM_TEMP_LOGFILE" 2>/dev/null
+            exit 1
+        fi
         start_bridge
+        sleep 1
+        if ! bridge_running; then
+            stop_bridge
+            kill "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null || true
+            rm -f "$PID_FILE"
+            echo "wwbridge failed to start, see $LOG_FILE" > "$TRIM_TEMP_LOGFILE" 2>/dev/null
+            exit 1
+        fi
         exit 0
         ;;
     stop)
@@ -112,13 +301,10 @@ case "$1" in
         exit 0
         ;;
     status)
-        if is_running; then
-            exit 0
-        fi
-        if pgrep -f "$APP_BIN" > /dev/null 2>&1; then
-            exit 0
-        fi
-        exit 3
+        is_running || exit 3
+        service_ready || exit 4
+        bridge_running || exit 5
+        exit 0
         ;;
     *)
         echo "Usage: $0 {start|stop|status}" > "$TRIM_TEMP_LOGFILE" 2>/dev/null

@@ -7,21 +7,21 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Upstream release tag (e.g. v2.3.1)'
+        description: 'fnOS 打包版本（建议 vX.Y.Z-1；tag 触发时自动使用 tag）'
         required: true
-        default: 'v2.3.1'
+        default: 'v2.5.3-1'
       upstream_ref:
-        # 默认与 version 对齐：按 release tag 检出，不要用 master
-        description: 'Upstream git ref (should match the release tag)'
+        # 打包版本与上游 ref 分开：例如 v2.5.3-1 + v2.5.3
+        description: 'Upstream git ref (release tag/commit)'
         required: true
-        default: 'v2.3.1'
-  schedule:
-    # 每天 01:00 UTC 检查上游新版本（tag 触发为主，此为兜底）
-    - cron: '0 1 * * *'
+        default: 'v2.5.3'
 
 jobs:
   build-fpk:
     runs-on: ubuntu-latest
+    concurrency:
+      group: build-fpk-${{ github.ref }}
+      cancel-in-progress: true
     # ★ 必须显式声明：仓库默认 workflow 权限是 read，
     #   不声明则 softprops/action-gh-release 建 release 会被拒（HTTP 403）。
     permissions:
@@ -53,9 +53,9 @@ jobs:
             # 约定：打包 tag = 上游 tag + 可选 -N 后缀，去掉 -N 即上游 ref。
             PKG_TAG="${{ github.ref_name }}"
             UPSTREAM_REF="${PKG_TAG%-*}"
+            VERSION="$PKG_TAG"
             # 防呆：若没有 -N 后缀，则 %-* 不匹配，UPSTREAM_REF 等于 PKG_TAG 本身，
             # 此时它本就应当是一个上游 tag。
-            VERSION="$UPSTREAM_REF"
             echo "tag 触发：打包版本=$PKG_TAG，上游 ref=$UPSTREAM_REF"
           fi
           if [ -z "$VERSION" ] || [ -z "$UPSTREAM_REF" ]; then
@@ -64,7 +64,6 @@ jobs:
           fi
           bash build-fpk.sh "$VERSION" "$UPSTREAM_REF"
           ls -la wildwork-*.fpk
-
       - name: Upload FPK artifact
         uses: actions/upload-artifact@v4
         with:

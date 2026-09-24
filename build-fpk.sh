@@ -11,9 +11,11 @@
 
 set -ex
 
-VERSION=${1:-v2.3.1}
-# 默认按 release tag 检出（与 VERSION 一致），不要用 master
-UPSTREAM_REF=${2:-${1:-v2.3.1}}
+# 第一个参数是本仓库的打包版本（默认 v2.3.1-1），第二个参数是上游 ref。
+# 打包版本带 -N，避免同一个上游版本修复封装后仍沿用原 version，导致
+# fnOS 把它识别成“同版本”或直接跳过升级。
+VERSION=${1:-v2.3.1-1}
+UPSTREAM_REF=${2:-v2.3.1}
 PKG_VERSION="${VERSION#v}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK_DIR=$(mktemp -d)
@@ -35,7 +37,6 @@ UPSTREAM="$WORK_DIR/upstream"
 #   UPSTREAM_REF 由 check-upstream.yml 传入上游 release 的 tag（如 v2.3.1）。
 git clone --depth 1 --branch "$UPSTREAM_REF" https://github.com/rockswang/wild-work.git "$UPSTREAM" \
   || { echo "FATAL: 无法按 ref '$UPSTREAM_REF' 克隆上游（tag 不存在？）"; exit 1; }
-
 ls -la "$UPSTREAM" | head -20
 
 (cd "$UPSTREAM" && go mod download && go build -o wild-work -ldflags="-s -w" ./cmd/wild-work)
@@ -119,12 +120,17 @@ printf 'ctl_stop              = true\r\n' >> "$M"
 printf 'service_port          = 7863\r\n' >> "$M"
 printf 'desktop_uidir         = ui\r\n' >> "$M"
 printf 'desktop_applaunchname = wildwork.main\r\n' >> "$M"
-printf 'changelog             = 自封装版：上游主程序升级到官方 %s（sha256 %s）。\r\n' "$VERSION" "$BINARY_SHA256" >> "$M"
+printf 'changelog             = 自封装版：上游主程序升级到官方 %s（sha256 %s）；fnOS 封装版本 %s。\r\n' "$UPSTREAM_REF" "$BINARY_SHA256" "$PKG_VERSION" >> "$M"
 
 echo "--- BUILD_ROOT 内容 ---"
 find "$BUILD_ROOT" -type f | sort
 
-# ---------- 3. 打包 ----------
+# ---------- 3. 启动兼容门禁 ----------
+# 不能只证明二进制能编译：用旧版两字段 config.json 实际启动本包，
+# 防止“非环回监听新增必填配置”这类升级破坏再次发布出去。
+bash "$SCRIPT_DIR/scripts/test-startup-compat.sh" "$BUILD_ROOT"
+
+# ---------- 4. 打包 ----------
 if ! command -v fnpack &> /dev/null; then
     wget -q https://static2.fnnas.com/fnpack/fnpack-1.2.1-linux-amd64 -O /tmp/fnpack
     chmod +x /tmp/fnpack
@@ -154,6 +160,13 @@ tar tzf "$FPK_FILE" | head -25
 INNER_MD5=$(tar xzf "$FPK_FILE" -O app.tgz | md5sum | cut -d' ' -f1)
 echo ""
 echo "Checksum self-check md5(app.tgz): $INNER_MD5"
+
+# ---------- 5. 打包后内容回验 ----------
+CHECK_DIR="$WORK_DIR/verify"
+mkdir -p "$CHECK_DIR"
+tar xzf "$FPK_FILE" -C "$CHECK_DIR"
+tar xzf "$CHECK_DIR/app.tgz" -C "$CHECK_DIR"
+bash "$SCRIPT_DIR/scripts/test-startup-compat.sh" "$CHECK_DIR"
 
 # 供后续 workflow 步骤取用：复制到工作区稳定路径
 if [ -n "$GITHUB_WORKSPACE" ]; then
