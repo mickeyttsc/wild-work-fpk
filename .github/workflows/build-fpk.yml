@@ -80,8 +80,14 @@ jobs:
           retention-days: 30
 
       - name: Create GitHub Release
+        # ★ 只给「重打包序号 tag」（vX.Y.Z-N）用，不给上游版本 tag（vX.Y.Z）用。
+        #   原因：Release 是按上游 tag 建的（v2.5.5），而 GitHub 建 Release 时
+        #   如果 tag 还不存在会**自动创建它**，该 tag 又匹配本工作流的 `v*` 触发
+        #   → 每次自动发布都会多跑一次无用的重复构建（实测 run 63），
+        #   还往同一个 Release 里塞一个名字不带 -N 的冗余附件。
+        #   上游版本 tag 的附件一律由 check-upstream.yml 的 publish-release.sh 负责。
+        if: startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-')
         uses: softprops/action-gh-release@v1
-        if: startsWith(github.ref, 'refs/tags/')
         with:
           files: wildwork-*.fpk
           generate_release_notes: true
