@@ -43,3 +43,7 @@ credentials*
 *.swp
 *~
 .DS_Store
+
+# CI 步骤的中间输出
+result.txt
+repair.txt
