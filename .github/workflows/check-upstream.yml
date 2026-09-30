@@ -50,6 +50,8 @@ jobs:
 
       - name: Decide whether to build (and which package revision)
         id: check
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           tag="${{ steps.upstream.outputs.tag }}"
