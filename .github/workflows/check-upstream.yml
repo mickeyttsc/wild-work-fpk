@@ -19,7 +19,18 @@ name: Check Upstream & Auto-Build
 on:
   schedule:
     - cron: '0 */2 * * *'   # 每 2 小时
-  workflow_dispatch: {}      # 支持手动立即检查
+  workflow_dispatch:        # 支持手动立即检查
+    inputs:
+      upstream_tag:
+        description: '强制按这个上游 tag 检查（留空 = 用上游最新 release）。补发历史版本时用。'
+        required: false
+        default: ''
+      force_rebuild:
+        description: '即使已发布也重新构建并覆盖附件（修封装 bug 后重打时用）'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['false', 'true']
 
 permissions:
   contents: write
@@ -41,12 +52,22 @@ jobs:
         id: upstream
         run: |
           set -euo pipefail
-          resp=$(curl -sf -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            https://api.github.com/repos/rockswang/wild-work/releases/latest)
-          tag=$(echo "$resp" | jq -r '.tag_name')
-          url=$(echo "$resp" | jq -r '.html_url')
+          # 手动触发时可指定 tag（补发历史版本 / 定向验证）；留空则用上游最新 release。
+          forced="${{ github.event.inputs.upstream_tag }}"
+          if [ -n "$forced" ]; then
+            tag="$forced"
+            url=$(curl -sf -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/rockswang/wild-work/releases/tags/${tag}" \
+              | jq -r '.html_url // ""')
+            echo "使用手动指定的上游 tag：$tag"
+          else
+            resp=$(curl -sf -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              https://api.github.com/repos/rockswang/wild-work/releases/latest)
+            tag=$(echo "$resp" | jq -r '.tag_name')
+            url=$(echo "$resp" | jq -r '.html_url')
+          fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "Upstream latest: $tag ($url)"
+          echo "Upstream: $tag ($url)"
 
       - name: Decide whether to build (and which package revision)
         id: check
@@ -59,12 +80,19 @@ jobs:
           bash scripts/check-published.sh "$tag" | tee result.txt
           published=$(grep -E '^PUBLISHED=' result.txt | cut -d= -f2)
           max_n=$(grep -E '^MAX_N=' result.txt | cut -d= -f2)
-          if [ "$published" = "true" ]; then
+          force="${{ github.event.inputs.force_rebuild }}"
+          if [ "$published" = "true" ] && [ "$force" != "true" ]; then
             # 已有产物：判定「已构建」。这是幂等判定 —— 巡检每 2 小时跑，
             # 不能每次都重建（重建还可能把修好的版本覆盖回旧内容）。
             echo "build=false" >> "$GITHUB_OUTPUT"
             echo "package_version=${base}-${max_n}" >> "$GITHUB_OUTPUT"
             echo "Upstream ${tag} already packaged as wildwork-${base}-${max_n}.fpk -> nothing to do"
+          elif [ "$published" = "true" ]; then
+            # force_rebuild：修了封装层之后重打，序号 +1，旧附件保留（可回滚）。
+            next_n=$(( max_n + 1 ))
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "package_version=${base}-${next_n}" >> "$GITHUB_OUTPUT"
+            echo "force_rebuild=true：已存在 ${base}-${max_n}，重打为 wildwork-${base}-${next_n}.fpk"
           else
             echo "build=true" >> "$GITHUB_OUTPUT"
             echo "package_version=${base}-1" >> "$GITHUB_OUTPUT"
