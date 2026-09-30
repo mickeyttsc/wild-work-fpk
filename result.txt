@@ -1,0 +1,7 @@
+上游 v2.5.3 已发布：
+  wildwork-2.5.3.fpk 7856548
+  wildwork-2.5.3-2.fpk 7860260
+  wildwork-2.5.3-3.fpk 7861555
+  wildwork-2.5.3-4.fpk 7863262
+PUBLISHED=true
+MAX_N=4

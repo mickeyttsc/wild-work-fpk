@@ -14,11 +14,26 @@ set -ex
 # 第一个参数是本仓库的打包版本（默认 v2.3.1-1），第二个参数是上游 ref。
 # 打包版本带 -N，避免同一个上游版本修复封装后仍沿用原 version，导致
 # fnOS 把它识别成“同版本”或直接跳过升级。
-VERSION=${1:-v2.3.1-1}
-UPSTREAM_REF=${2:-v2.3.1}
+VERSION=${1-v2.3.1-1}
+UPSTREAM_REF=${2-v2.3.1}
 PKG_VERSION="${VERSION#v}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK_DIR=$(mktemp -d)
+
+# ★ 版本号硬校验：不能为空、必须是 <数字.数字.数字>[-N] 形态。
+#   踩过的坑：check-upstream.yml 重构后仍引用旧输出名（steps.upstream.outputs.package_version），
+#   于是 dispatch 传进来 version="v" → PKG_VERSION 为空 → manifest 缺 version
+#   → fnpack 报 "Required field version is missing in manifest file" 才失败。
+#   在最早的位置拦住，比让 fnpack 在最后一步报错更容易定位。
+if [[ ! "$PKG_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9]+)?$ ]]; then
+    echo "FATAL: 打包版本号非法：VERSION='$VERSION' → PKG_VERSION='$PKG_VERSION'"
+    echo "       期望形如 v2.5.5-1（或 v2.5.5）。检查调用方传参是否解析成了空串。"
+    exit 1
+fi
+if [ -z "$UPSTREAM_REF" ]; then
+    echo "FATAL: UPSTREAM_REF 为空"
+    exit 1
+fi
 
 echo "=== Wild Work FPK Auto-Build ==="
 echo "Version: $VERSION (manifest: $PKG_VERSION)"
