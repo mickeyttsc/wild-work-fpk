@@ -103,8 +103,18 @@ if [ -f "$STYLECSS" ]; then
   .credit-tip { width: auto !important; max-width: calc(100vw - 20px); }
   .panel table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
 }
+
+/* ==== wildwork mobile patch v2 (2026-10-09, CDP 393px 实测) ====
+   v1 的 grid 三列覆盖被上游 ".pa-right .btn{justify-self:stretch;white-space:nowrap}"
+   及既有 @media 规则顺序压住不生效；改用 flex 强覆盖：按钮三列等宽换行。 ==== */
+@media (max-width: 640px) {
+  .panel-actions-wrap { flex-wrap: wrap !important; row-gap: 8px; }
+  .pa-group.pa-right { display: flex !important; flex-wrap: wrap !important; gap: 6px !important; width: 100% !important; }
+  .pa-group.pa-right .btn { flex: 1 1 calc(33% - 6px) !important; width: auto !important; min-width: 0 !important;
+    white-space: normal !important; font-size: 12px !important; padding: 8px 6px !important; text-align: center !important; }
+}
 MOBILECSS
-        echo "mobile css patch: appended (@media 640px override)"
+        echo "mobile css patch: appended (@media 640px override v1+v2)"
     else
         echo "mobile css patch: already present, skip"
     fi
