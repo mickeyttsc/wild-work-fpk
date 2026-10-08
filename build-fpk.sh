@@ -81,6 +81,37 @@ else
     echo "WARN: 上游没有 $APPJS（前端布局变了？），跳过子路径补丁——装完若网关面板 404 需人工核查"
 fi
 
+# ★ 手机适配补丁（2026-10-09，CDP 393px 仿真实测通过）：
+#   上游已带 3 段 @media (max-width: 640px)，但渠道按钮组是固定 5 列 grid
+#   （.pa-group.pa-right，实测 601px），顶栏双列信息格与 .credit-tip 固定宽
+#   都没进断点 → 手机上整页横向溢出（docScrollW 714 > 393）。追加覆盖块：
+#   按钮 3 列换行、信息格单列可断行、浮层自适应、表格横向滚动。
+#   与 app.js 子路径补丁同机制：改的是上游源码树里的 style.css，go:embed
+#   打进二进制，上游更新时自动跟随（若无此文件则空操作）。
+STYLECSS="$UPSTREAM/cmd/wild-work/web/style.css"
+if [ -f "$STYLECSS" ]; then
+    if ! grep -q 'wildwork mobile patch' "$STYLECSS"; then
+        cat >> "$STYLECSS" <<'MOBILECSS'
+
+/* ==== wildwork mobile patch (2026-10-09) ==== */
+@media (max-width: 640px) {
+  .panel-actions-wrap { flex-wrap: wrap; row-gap: 8px; }
+  .pa-group.pa-right { grid-template-columns: repeat(3, 1fr); width: 100%; }
+  .pa-group.pa-right .btn { width: 100%; min-width: 0; }
+  .top-info { grid-template-columns: 1fr; width: 100%; }
+  .info-value { display: block; max-width: 100%; overflow-wrap: anywhere; word-break: break-all; white-space: normal; }
+  .credit-tip { width: auto !important; max-width: calc(100vw - 20px); }
+  .panel table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+}
+MOBILECSS
+        echo "mobile css patch: appended (@media 640px override)"
+    else
+        echo "mobile css patch: already present, skip"
+    fi
+else
+    echo "WARN: 上游没有 $STYLECSS（前端布局变了？），跳过手机适配补丁"
+fi
+
 (cd "$UPSTREAM" && go mod download && go build -o wild-work -ldflags="-s -w" ./cmd/wild-work)
 
 # 诊断 + 硬校验：二进制必须在预期位置
