@@ -117,7 +117,14 @@ func main() {
 		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch {
 			case r.URL.Path == p:
-				r.URL.Path = "/"
+				// 目录型入口不带尾斜杠（桌面/应用中心/手机 App 生成的入口 URL 均无斜杠）：
+				// 按 http.ServeMux 惯例 301 补斜杠，让浏览器把 ./app.js 等文档相对路径
+				// 解析到 /app/wildwork/ 基址下。若只做内部重写，文档基址停在 /app/，
+				// 静态资源全部 404、面板 JS 挂死（2026-10-09 实测回归，详见技能 wildwork-ops）。
+				u := *r.URL
+				u.Path += "/"
+				http.Redirect(w, r, u.String(), http.StatusMovedPermanently)
+				return
 			case strings.HasPrefix(r.URL.Path, p+"/"):
 				r.URL.Path = strings.TrimPrefix(r.URL.Path, p)
 			}
