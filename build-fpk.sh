@@ -54,6 +54,33 @@ git clone --depth 1 --branch "$UPSTREAM_REF" https://github.com/rockswang/wild-w
   || { echo "FATAL: 无法按 ref '$UPSTREAM_REF' 克隆上游（tag 不存在？）"; exit 1; }
 ls -la "$UPSTREAM" | head -20
 
+# ★ 前端子路径补丁（fnOS 网关部署必需）：
+#   2.6.x 面板把 API 硬编码成根相对 fetch("/api/...")。页面经网关挂在
+#   /app/wildwork/ 时，这类请求打到 origin 根的 /api/* → 返回飞牛自己的
+#   404 页，面板全断（直连 7863 不受影响）。改成文档基址相对路径
+#   ("api/...") 后：网关子路径解析为 /app/wildwork/api/*，直连解析为
+#   /api/*，两种部署都对。内容变化会让内嵌 FS 的 ETag 自然失效，
+#   浏览器缓存自愈，无需清缓存。
+#   上游若哪天原生支持子路径，这里匹配不到即为空操作，补丁自动退役。
+APPJS="$UPSTREAM/cmd/wild-work/web/app.js"
+if [ -f "$APPJS" ]; then
+    # -F 定长匹配（引号+斜杠开头两种形式），避免 ERE/BRE 括号转义坑。
+    before=$(( $(grep -c -F '"/api/' "$APPJS" || true) + $(grep -c -F '`/api/' "$APPJS" || true) ))
+    sed -i 's|"/api/|"api/|g; s|`/api/|`api/|g' "$APPJS"
+    after=$(( $(grep -c -F '"/api/' "$APPJS" || true) + $(grep -c -F '`/api/' "$APPJS" || true) ))
+    echo "webui subpath patch: root-relative api paths ${before} -> ${after} (期望 after=0)"
+    if [ "$before" -gt 0 ] && [ "$after" -ne 0 ]; then
+        # 硬校验：打了补丁却没打干净 = 网关面板必 404，宁可不发布。
+        echo "FATAL: app.js 仍有根相对 /api/ 残留（$after 处），sed 模式失效？检查上游前端写法变化"
+        exit 1
+    fi
+    if [ "$before" -eq 0 ]; then
+        echo "NOTE: 上游 app.js 没有根相对 /api/（可能已原生支持子路径），补丁空操作"
+    fi
+else
+    echo "WARN: 上游没有 $APPJS（前端布局变了？），跳过子路径补丁——装完若网关面板 404 需人工核查"
+fi
+
 (cd "$UPSTREAM" && go mod download && go build -o wild-work -ldflags="-s -w" ./cmd/wild-work)
 
 # 诊断 + 硬校验：二进制必须在预期位置
