@@ -46,9 +46,9 @@ git push origin v2.2.2
 
 ## 回滚方案
 
-升级前会备份到：
+升级前会备份到（自选备份目录）：
 ```
-/vol2/1000/备份/Hermes 操作目录/wildwork_<原版本>_rollback_<时间戳>/
+<备份目录>/wildwork_<原版本>_rollback_<时间戳>/
 ```
 
 包含：
