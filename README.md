@@ -30,6 +30,12 @@ Wild Work 是「多渠道账号聚合工具」：把 WorkBuddy(CodeBuddy)、Trae
 - 下载：见 [Releases](https://github.com/mickeyttsc/wild-work-fpk/releases) 页附件（`wildwork-<版本>.fpk`）
 - 安装：飞牛应用中心 → 手动安装 → 选择 fpk。
 
+## 使用说明
+
+- 打开方式：fnOS 桌面图标（经网关小窗进入；服务端口仅本机回环，不对外监听）。
+- 首次进入在界面里添加 WorkBuddy / TraeWork / Qoder 账号，多个账号聚合为一个 OpenAI 兼容 API 使用。
+- 升级 / 重装保留已添加的账号与配置（数据在应用数据目录）。
+
 ## 维护
 
 自动出包链路与历史坑点：[FPK-AUTO-BUILD.md](FPK-AUTO-BUILD.md) ｜ 脚本说明：[scripts/README.md](scripts/README.md)
