@@ -156,6 +156,126 @@ else
     echo "WARN: 上游没有 $INDEXHTML，跳过补投提示注入"
 fi
 
+# ★ 登录跳转补丁（2026-10-18，对应「点登录没有任何反应」）：
+#   上游 startLogin() 是 async，window.open 写在 `await api(...)` **之后** —— 此时已脱离
+#   用户点击的同步执行栈，浏览器弹窗拦截器直接吞掉，用户看到的就是「点了不跳转」。
+#   修复三处：
+#     A. await 之前同步预开一个空白窗口，拿到句柄后再 location.replace 到授权页；
+#     B. 登录浮层里常驻一条可点击的授权链接（手机端/被拦时的兜底）；
+#     C. 刷新页面后若后端仍有 login_busy，恢复浮层并给出「取消」入口
+#        （否则流程卡在内存里，用户既看不到浮层也点不到取消，只能干等 6 分钟超时）。
+#   锚点找不到一律 WARN 不失败（上游重构不阻塞出包），落地与否在下面硬校验。
+APPJS2="$UPSTREAM/cmd/wild-work/web/app.js"
+if [ -f "$APPJS2" ]; then
+    python3 - "$APPJS2" <<'PYAPPJS'
+import sys
+p = sys.argv[1]
+s = open(p, encoding='utf-8').read()
+if 'WW popup patch' in s:
+    print('login popup patch: already present, skip')
+    sys.exit(0)
+
+anchor_a = 'async function startLogin(channel, accountLabel) {\n  try {\n    const r = await api("/api/login/start"'
+anchor_a = anchor_a.replace('/api/', 'api/')  # 子路径补丁已把 /api/ 改成 api/
+prelude = '''async function startLogin(channel, accountLabel) {
+  // ★ WW popup patch (2026-10-18)：window.open 必须在 await 之前**同步**调用。
+  //   await 之后调用已脱离用户手势栈，浏览器弹窗拦截器会直接吞掉 ——
+  //   现象就是「点了登录没有任何反应」（浮层起来了，但没有新标签页）。
+  let wwWin = null;
+  let wwUsed = false; // 预开的空白窗是否已被用于跳转（决定最后要不要清掉）
+  try { wwWin = window.open("", "_blank"); } catch (e) { wwWin = null; }
+  const wwClosePre = () => { try { if (wwWin && !wwWin.closed) wwWin.close(); } catch (e) {} };
+  const wwOpen = (u) => {
+    if (wwWin && !wwWin.closed) {
+      try { wwWin.location.replace(u); wwWin.opener = null; wwUsed = true; return true; } catch (e) {}
+    }
+    try { return !!window.open(u, "_blank"); } catch (e) { return false; }
+  };
+  try {
+    const r = await api("/api/login/start"'''
+prelude = prelude.replace('/api/', 'api/')
+
+ok_a = False
+if anchor_a in s:
+    s = s.replace(anchor_a, prelude, 1)
+    ok_a = True
+    # 不打开浏览器的分支要关掉预开的空白窗；要打开的分支改走 wwOpen
+    s = s.replace(
+        '    if (!url) { toast("无法获取登录链接"); return; }',
+        '    if (!url) { wwClosePre(); toast("无法获取登录链接"); return; }', 1)
+    s = s.replace(
+        '      window.open(url, "_blank", "noopener,noreferrer");',
+        '      if (!wwOpen(url)) toast("浏览器拦截了弹窗，请点「复制链接」手动打开", 6000);', 1)
+    s = s.replace(
+        '      $("loginMsg").textContent = "请在浏览器新窗口中完成登录…";\n      window.open(url, "_blank", "noopener,noreferrer");',
+        '      $("loginMsg").textContent = "请在浏览器新窗口中完成登录…";\n'
+        '      if (!wwOpen(url)) toast("浏览器拦截了弹窗，请点「复制链接」手动打开", 6000);', 1)
+    # backend_opened / hasWebLogin / loomy 之外的分支：后端没开窗时清掉空白窗
+    s = s.replace(
+        '    $("loginOverlay").classList.remove("hidden");\n    $("btnCopyUrl").dataset.url = url;',
+        '    if (!wwUsed) wwClosePre(); // 没用到预开窗（后端已自己开窗 / 走 CDP 捕获）就清掉，别留空白标签页\n'
+        '    $("loginOverlay").classList.remove("hidden");\n'
+        '    $("btnCopyUrl").dataset.url = url;\n'
+        '    // ★ WW popup patch：浮层里给出可点击链接（手机端 window.open 常被拦，这是最稳的兜底）\n'
+        '    (function (u) {\n'
+        '      let box = document.getElementById("wwAuthLinkBox");\n'
+        '      if (!box) {\n'
+        '        const ov = $("loginOverlay");\n'
+        '        const body = ov ? ov.querySelector(".modal-body") : null;\n'
+        '        if (!body) return;\n'
+        '        box = document.createElement("div");\n'
+        '        box.id = "wwAuthLinkBox";\n'
+        '        box.style.cssText = "margin-top:10px;font-size:13px;word-break:break-all";\n'
+        '        body.appendChild(box);\n'
+        '      }\n'
+        '      box.innerHTML = \'<a href="\' + String(u).replace(/"/g, "&quot;") + \'" target="_blank" rel="noopener" style="color:#2563eb;text-decoration:underline">若没有自动打开，点此打开授权页</a>\';\n'
+        '    })(url);', 1)
+else:
+    print('WARN: 未找到 startLogin 锚点，跳过登录跳转补丁 A')
+
+# C：刷新页面后恢复登录浮层（否则卡在 login_busy 里无从取消）
+tail = '''
+// ★ WW popup patch：进入面板时若后端仍有登录流程在跑（典型场景：刷新过页面），
+// 把浮层恢复出来并给出取消入口 —— 否则流程锁在内存里，用户既看不到浮层也点不到取消，
+// 只能干等 app.pollLogin 的 5~6 分钟超时，期间点任何渠道都会被「已有登录流程进行中」拒绝。
+setTimeout(function () {
+  try {
+    if (!state || !state.login_busy) return;
+    if (typeof loginPoll !== "undefined" && loginPoll) return;
+    if (document.getElementById("wwResumeLogin")) return;
+    const ov = document.getElementById("loginOverlay");
+    if (!ov) return;
+    const msg = document.getElementById("loginMsg");
+    const title = document.getElementById("loginTitle");
+    if (title) title.textContent = "登录进行中";
+    if (msg) {
+      msg.innerHTML = "上一次登录流程还没结束（可能是刷新页面导致的）。"
+        + "若已放弃，请点「取消」释放；否则继续在浏览器里完成授权。"
+        + \'<div id="wwResumeLogin" style="margin-top:10px">\'
+        + \'<a href="#" onclick="cancelLogin();return false;" style="color:#b91c1c">释放这次登录流程</a></div>\';
+    }
+    ov.classList.remove("hidden");
+  } catch (e) { /* 静默：这是辅助提示，绝不能影响面板主流程 */ }
+}, 1500);
+'''
+if 'WW popup patch：进入面板时' not in s:
+    s = s.rstrip() + '\n' + tail
+    ok_c = True
+else:
+    ok_c = False
+
+open(p, 'w', encoding='utf-8').write(s)
+print('login popup patch: A=%s C=%s' % (ok_a, ok_c))
+PYAPPJS
+    if ! grep -q 'WW popup patch' "$APPJS2"; then
+        echo "FATAL: 登录跳转补丁未落地（上游 app.js 结构变了？），会重现「点登录没反应」"
+        exit 1
+    fi
+    echo "login popup patch: markers=$(grep -c 'WW popup patch' "$APPJS2")"
+else
+    echo "WARN: 上游没有 $APPJS2，跳过登录跳转补丁"
+fi
+
 (cd "$UPSTREAM" && go mod download && go build -o wild-work -ldflags="-s -w" ./cmd/wild-work)
 
 # 诊断 + 硬校验：二进制必须在预期位置
