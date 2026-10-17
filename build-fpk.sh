@@ -122,8 +122,41 @@ else
     echo "WARN: 上游没有 $STYLECSS（前端布局变了？），跳过手机适配补丁"
 fi
 
-(cd "$UPSTREAM" && go mod download && go build -o wild-work -ldflags="-s -w" ./cmd/wild-work)
+# ★ 补投页引导补丁（2026-10-18）：
+#   上游 2.6+ 陆续新增「本机回环回调」渠道（CodeArts /oauth/callback、Gemini /oauth-callback、
+#   LobsterAI /auth/callback、千问 /callback）。wild-work 跑在 NAS 上、浏览器在用户设备上，
+#   授权完成后浏览器必然跳到用户自己的 127.0.0.1:随机端口 并显示打不开，面板只能干等到超时。
+#   封装层的 template/ui/index.cgi 负责把这条地址转交回 NAS（补投），但用户不知道有这一页。
+#   这里在「等待登录」浮层里常驻一行说明 + 入口链接（锚点唯一，上游改版找不到就跳过）。
+INDEXHTML="$UPSTREAM/cmd/wild-work/web/index.html"
+if [ -f "$INDEXHTML" ]; then
+    python3 - "$INDEXHTML" <<'PYPATCH'
+import sys
+p = sys.argv[1]
+s = open(p, encoding='utf-8').read()
+if 'ww-replay-tip' in s:
+    print('replay tip patch: already present, skip')
+    sys.exit(0)
+anchor = '      <div class="login-buttons">'
+tip = ('      <div id="wwReplayTip" class="ww-replay-tip" style="margin-top:10px;font-size:12.5px;'
+       'line-height:1.7;color:#92400e;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;'
+       'padding:8px 10px">登录后若浏览器跳到一条 <b>127.0.0.1</b> 地址并显示打不开，属正常'
+       '（回调落在你自己的设备上）。把地址栏整条复制到 '
+       '<a href="/cgi/ThirdParty/wildwork/index.cgi/" target="_blank" rel="noopener" '
+       'style="color:#b45309;text-decoration:underline">登录补投</a> 页提交，NAS 端才会收到授权码。'
+       'ZCode / MiniMax / Qoder 走服务端轮询，不需要补投。</div>\n')
+if anchor in s:
+    s = s.replace(anchor, tip + anchor, 1)
+    open(p, 'w', encoding='utf-8').write(s)
+    print('replay tip patch: injected')
+else:
+    print('WARN: 未找到 login-buttons 锚点，跳过补投提示注入（不影响功能）')
+PYPATCH
+else
+    echo "WARN: 上游没有 $INDEXHTML，跳过补投提示注入"
+fi
 
+(cd "$UPSTREAM" && go mod download && go build -o wild-work -ldflags="-s -w" ./cmd/wild-work)
 # 诊断 + 硬校验：二进制必须在预期位置
 ls -la "$UPSTREAM/wild-work" || { echo "FATAL: binary not at $UPSTREAM/wild-work"; ls -la "$UPSTREAM"; exit 1; }
 BINARY_SHA256=$(sha256sum "$UPSTREAM/wild-work" | cut -d' ' -f1)
