@@ -72,6 +72,16 @@ else
           RUN_ID="$rid"
           break
         fi
+        # ★ failure 必须立刻失败（2026-10-18 修）：它是确定性失败，等下去也不会变成功。
+        #   实测：上游重构前端 → 封装补丁锚点失效 → build 失败，而这里原本会
+        #   「继续等后续运行」把 12 分钟等满才报超时，白白浪费一整轮巡检，
+        #   且失败原因被掩盖成「没等到成功的 run」，排查时看不到真因。
+        if [ "$concl" = "failure" ]; then
+          die "build run $rid 失败（conclusion=failure）—— 这是确定性失败，等下去不会变成功。
+       常见原因：上游重构了前端/常量，导致封装补丁锚点失效（见该 run 的 FATAL 日志）；
+       或 compat-audit 适配性审计有 FAIL。请打开
+       https://github.com/${GITHUB_REPOSITORY}/actions/runs/$rid 查看具体步骤。"
+        fi
         # ★ 不在这里立刻失败：build-fpk.yml 有 concurrency cancel-in-progress，
         #   短时间内连发两次 dispatch 时先到的那次会被「取消」——
         #   实测正是这个模式（run 61 cancelled → run 62 success）。

@@ -344,7 +344,15 @@ else
     echo "WARN: 上游没有 internal/gemini/constants.go，跳过 Gemini scope 收敛"
 fi
 
-(cd "$UPSTREAM" && go mod download && go build -o wild-work -ldflags="-s -w" ./cmd/wild-work)
+# ★ 确定性构建（2026-10-18）：两个二进制都必须带 -trimpath -buildvcs=false。
+#   起因：同输入连续两次构建（2.9.0-8 vs 2.9.0-9）二进制 sha256 不一致，实测取证——
+#   · wild-work 缺 -trimpath ⇒ 把构建机路径（/home/runner/go/pkg/mod/...）与
+#     每次随机的工作目录（/tmp/tmp.XXXX/upstream/...）编进了二进制，必然每次不同；
+#   · 两者都缺 -buildvcs=false ⇒ go build 会把当前 git 的 commit/dirty 状态嵌进去，
+#     提交与否、工作区脏不脏都会改变产物。
+#   后果：无法证明「Release 上的包 == 某次构建产物」，回滚/复现都失去依据。
+#   修完判据：同输入连打两次，wild-work 与 wwbridge 的 sha256 必须逐字节一致。
+(cd "$UPSTREAM" && go mod download && go build -trimpath -buildvcs=false -o wild-work -ldflags="-s -w" ./cmd/wild-work)
 
 # 诊断 + 硬校验：二进制必须在预期位置
 ls -la "$UPSTREAM/wild-work" || { echo "FATAL: binary not at $UPSTREAM/wild-work"; ls -la "$UPSTREAM"; exit 1; }
@@ -365,7 +373,7 @@ if ! command -v go >/dev/null 2>&1; then
     echo "FATAL: 缺少 go 工具链，无法编译 wwbridge（CI 的 setup-go 步必须在使用本脚本之前）"
     exit 1
 fi
-(cd "$SCRIPT_DIR/bridge" && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "$BUILD_ROOT/app/bin/wwbridge" .) \
+(cd "$SCRIPT_DIR/bridge" && CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags="-s -w" -o "$BUILD_ROOT/app/bin/wwbridge" .) \
   || { echo "FATAL: wwbridge 编译失败"; exit 1; }
 [ -s "$BUILD_ROOT/app/bin/wwbridge" ] || { echo "FATAL: wwbridge 产物为空"; exit 1; }
 chmod +x "$BUILD_ROOT/app/bin/wwbridge"
