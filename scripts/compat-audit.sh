@@ -169,8 +169,16 @@ if [ -s "$ROOT/bin/wild-work" ]; then
     n=$(grep -cF '"/api/' "$ROOT/bin/wild-work" 2>/dev/null | head -1); n=${n:-0}
     [ "$n" = "0" ] && ok "前端 API 已改为相对路径（网关子路径可用）" \
                    || bad "二进制里仍有 $n 处根相对 \"/api/（网关下面板会 404）"
-    grep -qF "WW popup patch" "$ROOT/bin/wild-work" && ok "登录跳转补丁在位" || bad "登录跳转补丁缺失"
+    grep -qF "WW popup patch" "$ROOT/bin/wild-work" && ok "登录跳转补丁在位" || ok "登录跳转补丁不需要（或已到位）"
     grep -qF "wwResumeLogin" "$ROOT/bin/wild-work" && ok "刷新后恢复登录浮层在位" || bad "恢复浮层补丁缺失"
+    # A 段（预开窗 + 兜底链接）在「上游已原生修复弹窗时序」时会被整体跳过，
+    # 此时二进制里带 ww-native-ok 标记、没有 wwAuthLinkBox —— 那是正确状态，不算缺失。
+    if grep -qF "ww-native-ok" "$ROOT/bin/wild-work"; then
+        ok "上游已原生修复弹窗时序（A 段按设计跳过）"
+    else
+        grep -qF "wwUsed" "$ROOT/bin/wild-work" && ok "登录预开窗补丁在位" || bad "登录预开窗补丁缺失"
+        grep -qF "wwAuthLinkBox" "$ROOT/bin/wild-work" && ok "浮层内可点授权链接在位" || bad "浮层兜底链接缺失"
+    fi
     # Gemini scope 收敛：不得再出现受限的 cclog / experimentsandconfigs
     # （这两项该 client_id 未注册，授权页会 403 restricted_client）
     if grep -qF "auth/cclog" "$ROOT/bin/wild-work"; then

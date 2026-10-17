@@ -140,7 +140,11 @@ fi
 #   锚点找不到一律 WARN 不失败（上游重构不阻塞出包），落地与否在下面硬校验。
 APPJS2="$UPSTREAM/cmd/wild-work/web/app.js"
 if [ -f "$APPJS2" ]; then
+    # set -e 下 python 非零会直接终止脚本，导致下面的诊断分支永远进不去，
+    # 所以这里显式关闭 errexit 拿到退出码再判定。
+    set +e
     python3 - "$APPJS2" <<'PYAPPJS'
+import re
 import sys
 p = sys.argv[1]
 s = open(p, encoding='utf-8').read()
@@ -169,6 +173,30 @@ prelude = '''async function startLogin(channel, accountLabel) {
 prelude = prelude.replace('/api/', 'api/')
 
 ok_a = False
+
+# ★ 先判断上游是否**已原生修复**弹窗时序（window.open 写在 await 之前）。
+#   为什么要这层判断：上游一旦自己修好，我们的锚点就可能匹配不上，而旧逻辑会
+#   直接 FATAL —— 结果是「上游越修越坏，我们的自动跟随永久卡住」。
+#   实测：上游真的重写过 startLogin，这类情况必须能自动识别并放行。
+native_fixed = False
+_fn = re.search(r'async function startLogin\s*\([^)]*\)\s*\{', s)
+if _fn:
+    _i = _fn.end() - 1
+    _depth = 0
+    _body = ''
+    for _j in range(_i, min(len(s), _i + 12000)):
+        if s[_j] == '{':
+            _depth += 1
+        elif s[_j] == '}':
+            _depth -= 1
+            if _depth == 0:
+                _body = s[_i:_j + 1]
+                break
+    _w = _body.find('await api(')
+    _o = _body.find('window.open(url')
+    if _w > 0 and _o > 0 and _o < _w:
+        native_fixed = True
+
 if anchor_a in s:
     s = s.replace(anchor_a, prelude, 1)
     ok_a = True
@@ -203,8 +231,18 @@ if anchor_a in s:
         '      }\n'
         '      box.innerHTML = \'<a href="\' + String(u).replace(/"/g, "&quot;") + \'" target="_blank" rel="noopener" style="color:#2563eb;text-decoration:underline">若没有自动打开，点此打开授权页</a>\';\n'
         '    })(url);', 1)
+elif native_fixed:
+    # 上游自己把 window.open 提到 await 之前了：A 段（预开窗 + 兜底链接）整体跳过。
+    # 注意：此时是**真的没有**兜底链接 —— 不假装注入（上游重构后变量名未知，
+    # 硬插会引入未定义变量的风险）。只加 native 标记，让下游断言知道"该段不需要"。
+    print('login popup patch: 上游已原生修复弹窗时序，A 段整体跳过（仅保留恢复浮层 C 段）')
+    s = s.rstrip() + '\n// ww-native-ok: 上游已原生修复弹窗时序（window.open 在 await 之前）\n'
 else:
-    print('WARN: 未找到 startLogin 锚点，跳过登录跳转补丁 A')
+    print('FATAL: startLogin 锚点失效且上游未原生修复 —— 上游重构了前端登录流程，'
+          '需要人工更新 build-fpk.sh 里的 anchor_a。下面是当前 startLogin 的开头，供对照：')
+    _m = re.search(r'async function startLogin[^\n]*\n(?:.*\n){0,8}', s)
+    print(_m.group(0) if _m else '(找不到 startLogin 函数)')
+    sys.exit(2)
 
 # C：刷新页面后恢复登录浮层（否则卡在 login_busy 里无从取消）
 tail = '''
@@ -240,11 +278,25 @@ else:
 open(p, 'w', encoding='utf-8').write(s)
 print('login popup patch: A=%s C=%s' % (ok_a, ok_c))
 PYAPPJS
-    if ! grep -q 'WW popup patch' "$APPJS2"; then
-        echo "FATAL: 登录跳转补丁未落地（上游 app.js 结构变了？），会重现「点登录没反应」"
+    appjs_rc=$?
+    set -e
+    if [ "$appjs_rc" -ne 0 ]; then
+        # python 段自己已经打印了 FATAL 原因与当前 startLogin 的样貌
+        echo "FATAL: 登录跳转补丁无法落地（exit=$appjs_rc）。上游重构了前端登录流程，"
+        echo "       需人工更新 build-fpk.sh 里的 anchor_a / prelude 锚点后再出包。"
+        echo "       本次**不会**发出缺功能的包。"
         exit 1
     fi
-    echo "login popup patch: markers=$(grep -c 'WW popup patch' "$APPJS2")"
+    # 二次保险：A 段若打了，必须真的带出 wwUsed（预开窗逻辑），
+    # 不能用宽泛的 'WW popup patch'（C 段尾部也含该串，会造成"打了一半也算过"）。
+    if grep -qF 'WW popup patch' "$APPJS2" && ! grep -qF 'ww-native-ok' "$APPJS2"; then
+        grep -qF 'wwUsed' "$APPJS2" || {
+            echo "FATAL: A 段补丁只落了一半（有标记但缺 wwUsed），拒绝出包"; exit 1; }
+        grep -qF 'wwAuthLinkBox' "$APPJS2" || {
+            echo "FATAL: A 段补丁缺兜底链接（wwAuthLinkBox），拒绝出包"; exit 1; }
+    fi
+    grep -qF 'wwResumeLogin' "$APPJS2" || { echo "FATAL: C 段补丁（恢复登录浮层）缺失，拒绝出包"; exit 1; }
+    echo "login popup patch: markers=$(grep -c 'WW popup patch' "$APPJS2" | head -1)"
 else
     echo "WARN: 上游没有 $APPJS2，跳过登录跳转补丁"
 fi
