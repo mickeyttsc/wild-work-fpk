@@ -158,6 +158,32 @@ fi
 
 (cd "$UPSTREAM" && go mod download && go build -o wild-work -ldflags="-s -w" ./cmd/wild-work)
 
+# 诊断 + 硬校验：二进制必须在预期位置
+ls -la "$UPSTREAM/wild-work" || { echo "FATAL: binary not at $UPSTREAM/wild-work"; ls -la "$UPSTREAM"; exit 1; }
+BINARY_SHA256=$(sha256sum "$UPSTREAM/wild-work" | cut -d' ' -f1)
+echo "Binary SHA256: $BINARY_SHA256"
+
+# ---------- 2. 组装 fpk 目录 ----------
+mkdir -p "$BUILD_ROOT/app/bin" "$BUILD_ROOT/app/ui/images" \
+         "$BUILD_ROOT/cmd" "$BUILD_ROOT/config" "$BUILD_ROOT/wizard"
+
+# app/bin: 上游二进制 + 桥接二进制 + 启动配置
+cp "$UPSTREAM/wild-work" "$BUILD_ROOT/app/bin/wild-work"
+chmod +x "$BUILD_ROOT/app/bin/wild-work"
+# ★ wwbridge 从本仓 bridge/ 源码现编（v2 起）：修复上游 2.5.5+ CSRF 在
+#   fnOS 网关链路（$host 丢端口 + HTTP 不发 Sec-Fetch-Site）误拦浏览器
+#   POST 的问题。历史二进制 template/wwbridge 仅作故障回滚参照，不再打进包。
+if ! command -v go >/dev/null 2>&1; then
+    echo "FATAL: 缺少 go 工具链，无法编译 wwbridge（CI 的 setup-go 步必须在使用本脚本之前）"
+    exit 1
+fi
+(cd "$SCRIPT_DIR/bridge" && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "$BUILD_ROOT/app/bin/wwbridge" .) \
+  || { echo "FATAL: wwbridge 编译失败"; exit 1; }
+[ -s "$BUILD_ROOT/app/bin/wwbridge" ] || { echo "FATAL: wwbridge 产物为空"; exit 1; }
+chmod +x "$BUILD_ROOT/app/bin/wwbridge"
+echo "wwbridge SHA256: $(sha256sum "$BUILD_ROOT/app/bin/wwbridge" | cut -d' ' -f1)"
+cp "$TPL/bin-config.json" "$BUILD_ROOT/app/bin/config.json"
+
 # ★ Gemini 渠道凭据提取（2026-10-18）：
 #   上游 <internal/gemini/oauthclient.go> 在运行时按「环境变量 → 本机官方 CLI 包」两级
 #   查找 Google OAuth 客户端（client_id / client_secret）。这两个值是官方 CLI 内嵌的
@@ -199,31 +225,6 @@ if [ -s "$GEMINI_ENV_OUT" ]; then
 else
     echo "WARN: 未提取到 Gemini 凭据 —— Gemini 渠道在该包里不可用（其余渠道不受影响）"
 fi
-# 诊断 + 硬校验：二进制必须在预期位置
-ls -la "$UPSTREAM/wild-work" || { echo "FATAL: binary not at $UPSTREAM/wild-work"; ls -la "$UPSTREAM"; exit 1; }
-BINARY_SHA256=$(sha256sum "$UPSTREAM/wild-work" | cut -d' ' -f1)
-echo "Binary SHA256: $BINARY_SHA256"
-
-# ---------- 2. 组装 fpk 目录 ----------
-mkdir -p "$BUILD_ROOT/app/bin" "$BUILD_ROOT/app/ui/images" \
-         "$BUILD_ROOT/cmd" "$BUILD_ROOT/config" "$BUILD_ROOT/wizard"
-
-# app/bin: 上游二进制 + 桥接二进制 + 启动配置
-cp "$UPSTREAM/wild-work" "$BUILD_ROOT/app/bin/wild-work"
-chmod +x "$BUILD_ROOT/app/bin/wild-work"
-# ★ wwbridge 从本仓 bridge/ 源码现编（v2 起）：修复上游 2.5.5+ CSRF 在
-#   fnOS 网关链路（$host 丢端口 + HTTP 不发 Sec-Fetch-Site）误拦浏览器
-#   POST 的问题。历史二进制 template/wwbridge 仅作故障回滚参照，不再打进包。
-if ! command -v go >/dev/null 2>&1; then
-    echo "FATAL: 缺少 go 工具链，无法编译 wwbridge（CI 的 setup-go 步必须在使用本脚本之前）"
-    exit 1
-fi
-(cd "$SCRIPT_DIR/bridge" && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "$BUILD_ROOT/app/bin/wwbridge" .) \
-  || { echo "FATAL: wwbridge 编译失败"; exit 1; }
-[ -s "$BUILD_ROOT/app/bin/wwbridge" ] || { echo "FATAL: wwbridge 产物为空"; exit 1; }
-chmod +x "$BUILD_ROOT/app/bin/wwbridge"
-echo "wwbridge SHA256: $(sha256sum "$BUILD_ROOT/app/bin/wwbridge" | cut -d' ' -f1)"
-cp "$TPL/bin-config.json" "$BUILD_ROOT/app/bin/config.json"
 
 # app/ui: 入口配置 + 登录补投页 + 图标（fnpack 要求必须在 app/ui/ 下）
 cp "$TPL/ui/config" "$BUILD_ROOT/app/ui/config"
