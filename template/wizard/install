@@ -2,18 +2,36 @@
   {
     "stepTitle": "设置控制台管理密码",
     "items": [
-      { "type": "tips", "helpText": "Wild Work 控制台需要密码才能访问（它把多个 IDE 账号聚合成一个 OpenAI 兼容接口，涉及你的账号，所以默认开启鉴权）。" },
-      { "type": "tips", "helpText": "⚠️ 留空不填 = 使用默认密码 password。装完打开『Wild Work』图标，密码框输入 password 即可进入控制台。" },
-      { "type": "tips", "helpText": "也可以在这里直接设一个自己的密码（8–128 位）。设了就用你填的，不会用默认值。" },
-      { "type": "tips", "helpText": "密码同时存放在应用的『数据目录』下的 admin-password.txt（应用中心里可查看/打开该应用的数据目录），忘了可去那里查看。" },
-      { "type": "tips", "helpText": "提醒：控制台登录连续输错 5 次会锁定该来源 IP 5 分钟，请确认密码后再提交。" },
+      {
+        "type": "tips",
+        "helpText": "Wild Work 控制台需要密码才能访问（它把多个 IDE 账号聚合成一个 OpenAI 兼容接口，涉及你的账号，所以默认开启鉴权）。"
+      },
+      {
+        "type": "tips",
+        "helpText": "⚠️ 留空不填 = 使用默认密码 password。装完打开『Wild Work』图标，密码框输入 password 即可进入控制台。"
+      },
+      {
+        "type": "tips",
+        "helpText": "也可以在这里直接设一个自己的密码（8–128 位）。设了就用你填的，不会用默认值。"
+      },
+      {
+        "type": "tips",
+        "helpText": "密码同时存放在应用的『数据目录』下的 admin-password.txt（应用中心里可查看/打开该应用的数据目录），忘了可去那里查看。"
+      },
+      {
+        "type": "tips",
+        "helpText": "提醒：控制台登录连续输错 5 次会锁定该来源 IP 5 分钟，请确认密码后再提交。"
+      },
       {
         "type": "password",
         "field": "wizard_admin_password",
         "label": "管理密码（留空则使用默认密码 password）",
         "initValue": "",
         "rules": [
-          { "pattern": "^(|.{8,128})$", "message": "密码需为 8–128 位；留空则使用默认密码 password" }
+          {
+            "pattern": "^(|.{8,128})$",
+            "message": "密码需为 8–128 位；留空则使用默认密码 password"
+          }
         ]
       }
     ]
@@ -21,26 +39,56 @@
   {
     "stepTitle": "Wild Work 是什么",
     "items": [
-      { "type": "tips", "helpText": "Wild Work 是 TraeWork / WorkBuddy / Qoder 账号池代理：把多个 IDE 账号汇成一个 OpenAI 兼容接口，供 ChatBox、NextChat、沉浸式翻译等客户端使用。" },
-      { "type": "tips", "helpText": "接口地址：http://NAS的IP:7863/v1 。安装后在控制台首页『OpenAI接口』处会显示实际地址，点击即可复制。" },
-      { "type": "tips", "helpText": "多账号：＋WorkBuddy / ＋TraeWork / ＋Qoder 三个按钮每种都能加多个号，混着加也行，全部进入同一个账号池。" }
+      {
+        "type": "tips",
+        "helpText": "Wild Work 是 TraeWork / WorkBuddy / Qoder 账号池代理：把多个 IDE 账号汇成一个 OpenAI 兼容接口，供 ChatBox、NextChat、沉浸式翻译等客户端使用。"
+      },
+      {
+        "type": "tips",
+        "helpText": "接口地址：http://NAS的IP:7863/v1 。安装后在控制台首页『OpenAI接口』处会显示实际地址，点击即可复制。"
+      },
+      {
+        "type": "tips",
+        "helpText": "多账号：＋WorkBuddy / ＋TraeWork / ＋Qoder 三个按钮每种都能加多个号，混着加也行，全部进入同一个账号池。"
+      }
     ]
   },
   {
     "stepTitle": "账号池与自动切换（重点）",
     "items": [
-      { "type": "tips", "helpText": "自动切换：某个号被限流或连续出错时，自动进入冷却并切到下一个健康账号；全部账号都不可用时才提示 no_healthy_account。" },
-      { "type": "tips", "helpText": "积分管理：积分快用完的号建议点『停用』雪藏（不参与轮换），积分刷新后再『启用』；『刷新积分』『全部签到』支持一键批量。" },
-      { "type": "tips", "helpText": "添加账号：点＋按钮 → 浏览器完成 IDE 登录 → 页面停在打不开的 127.0.0.1 地址 → 复制完整地址 → 桌面打开『Wild Work 登录补投』粘贴并确认。每个号都这样加一次。" }
+      {
+        "type": "tips",
+        "helpText": "自动切换：某个号被限流或连续出错时，自动进入冷却并切到下一个健康账号；全部账号都不可用时才提示 no_healthy_account。"
+      },
+      {
+        "type": "tips",
+        "helpText": "积分管理：积分快用完的号建议点『停用』雪藏（不参与轮换），积分刷新后再『启用』；『刷新积分』『全部签到』支持一键批量。"
+      },
+      {
+        "type": "tips",
+        "helpText": "添加账号：点＋按钮 → 浏览器完成 IDE 登录 → 页面停在打不开的 127.0.0.1 地址 → 复制完整地址 → 桌面打开『Wild Work 登录补投』粘贴并确认。每个号都这样加一次。"
+      }
     ]
   },
   {
     "stepTitle": "桌面图标与访问方式",
     "items": [
-      { "type": "tips", "helpText": "『Wild Work』主入口：走 fnOS 统一网关（/app/wildwork），局域网和飞牛远程都能打开，接口地址显示为 NAS 局域网 IP。" },
-      { "type": "tips", "helpText": "『Wild Work 直连』：直接连 http://NAS的IP:7863，仅局域网可用，是网关异常时的备用入口。" },
-      { "type": "tips", "helpText": "『Wild Work 登录补投』：添加账号时粘贴 127.0.0.1 回调地址专用页，局域网和远程都能用。" },
-      { "type": "tips", "helpText": "数据说明：账号凭据保存在应用配置目录，升级不会丢失；运行日志在应用数据目录 wild-work.log。" }
+      {
+        "type": "tips",
+        "helpText": "『Wild Work』主入口：走 fnOS 统一网关（/app/wildwork），局域网与飞牛远程（含自有域名反代）都能打开。"
+      },
+      {
+        "type": "tips",
+        "helpText": "『Wild Work 登录补投』：添加账号时浏览器会跳到打不开的 127.0.0.1 回调地址，把地址整条粘到这个页面提交，NAS 端才收得到授权码（各渠道通用，新渠道无需等待适配）。"
+      },
+      {
+        "type": "tips",
+        "helpText": "日志：运行日志在应用数据目录的 app.log 与 wild-work.log，超过 10 MB 会自动轮转为 .1，不需要手工清理。"
+      },
+      {
+        "type": "tips",
+        "helpText": "数据：账号凭据保存在应用配置目录，升级/重装选「保留数据」不会丢失，无需重新登录。"
+      }
     ]
   }
 ]

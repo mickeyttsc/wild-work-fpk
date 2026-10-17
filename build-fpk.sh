@@ -447,6 +447,13 @@ tar xzf "$FPK_FILE" -C "$CHECK_DIR"
 tar xzf "$CHECK_DIR/app.tgz" -C "$CHECK_DIR"
 bash "$SCRIPT_DIR/scripts/test-startup-compat.sh" "$CHECK_DIR"
 
+# ---------- 5b. 适配性审计（构建期硬门禁）----------
+# 前面两步证明的是「能启动、补丁都在」；这里补上「装上之后好用」那一层：
+# 向导文案是否还在介绍已删入口、启动脚本有没有日志轮转、图标/权限/入口字段
+# 是否合 fnOS 规范、前端 API 是否已改成相对路径…… 任何一条 FAIL 都不发布。
+# （脚本可独立在部署后复跑：bash scripts/compat-audit.sh <解包目录>）
+bash "$SCRIPT_DIR/scripts/compat-audit.sh" "$CHECK_DIR"
+
 # ---------- 6. 封装层补丁「落地断言」----------
 # 为什么必须从**产物**回读：本脚本所有补丁都是「拿字符串去匹配上游源码」，
 # 上游改一行写法就可能静默失效。失效的后果不是构建失败，而是发出一个

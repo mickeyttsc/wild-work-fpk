@@ -277,12 +277,63 @@ stop_bridge() {
     rm -f "$SOCK_FILE" 2>/dev/null
 }
 
+# ---------------------------------------------------------------------------
+# 运行期自维护（2026-10-18 新增，起因：重装前实测 app.log 已长到 15 MB）
+#
+# 上游自己在 <stateDir>/app.log 里按请求写日志（O_APPEND，无轮转），
+# 本脚本的 nohup 输出又写 wild-work.log。两个文件只增不减 ⇒
+#   · 应用数据目录持续膨胀（备份跟着变大）
+#   · 极端情况下把 /vol2 写满，服务与其它应用一起遭殃
+# fnOS 不会替第三方应用做日志轮转，所以必须自己收。
+# 策略保守：只在「文件超过阈值」时把当前文件挪成 .1（覆盖旧的 .1），
+# 不做多份历史、不删内容、不改上游写日志的方式 —— 出问题时 .1 里还有上一段。
+# ---------------------------------------------------------------------------
+LOG_ROTATE_BYTES=${WILDWORK_LOG_ROTATE_BYTES:-10485760}   # 10 MiB
+
+rotate_log() { # $1=日志路径
+    local f="$1"
+    [ -f "$f" ] || return 0
+    local sz
+    sz=$(stat -c %s "$f" 2>/dev/null || echo 0)
+    [ "$sz" -gt "$LOG_ROTATE_BYTES" ] 2>/dev/null || return 0
+    # 用 cp+truncate 而不是 mv：本进程可能正持有该 fd（nohup 重定向），
+    # mv 后新写入会跑到被改名的 inode 上，日志就"丢"了；truncate 原地清空才稳。
+    cp -f "$f" "$f.1" 2>/dev/null || true
+    : > "$f" 2>/dev/null || true
+}
+
+cleanup_stale_login_state() {
+    # 上游 pollLogin 超时路径**不删** login-state.json，只在成功/取消时删。
+    # 残留文件会让使用者误判"还有登录在进行"，也让排障时看错时间戳。
+    # 这里只清理「明显过期」的（默认 30 分钟 >> 上游 5 分钟流程上限），
+    # 绝不碰正在进行的流程。
+    local fp="$TRIM_PKGVAR/login-state.json"
+    [ -f "$fp" ] || return 0
+    local now mt age
+    now=$(date +%s)
+    mt=$(stat -c %Y "$fp" 2>/dev/null || echo 0)
+    [ "$mt" -gt 0 ] || return 0
+    age=$((now - mt))
+    [ "$age" -gt 1800 ] && rm -f "$fp" 2>/dev/null
+    return 0
+}
+
+housekeeping() {
+    rotate_log "$TRIM_PKGVAR/app.log"
+    rotate_log "$LOG_FILE"
+    cleanup_stale_login_state
+}
+
+
 case "$1" in
     start)
         if is_running; then
             exit 0
         fi
         mkdir -p "$TRIM_PKGVAR" "$TRIM_PKGETC/auth" "$TRIM_PKGHOME" "$TRIM_PKGTMP"
+        # 每次启动先做运行期自维护（日志轮转 + 清理过期 login-state）：
+        # 放在最前面，保证后续所有 nohup 追加都写在"清空后的"文件上。
+        housekeeping
         # 三份配置都要引导，缺一不可：
         #   TRIM_APPDEST/bin/config.json —— 上游 workDir() 实际读取的那份（决定能否启动）
         #   TRIM_PKGVAR/config.json     —— 生命周期与备份的权威副本
