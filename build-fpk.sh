@@ -317,6 +317,13 @@ GEMINI_ENV_OUT="$BUILD_ROOT/app/bin/gemini-oauth.env"
 : > "$GEMINI_ENV_OUT"
 chmod 600 "$GEMINI_ENV_OUT" 2>/dev/null || true
 if command -v npm >/dev/null 2>&1; then
+    # ★★ 安全（2026-10-18 实测事故）：本脚本开头是 `set -ex`，xtrace 会把
+    #   `gem_id=$(…)` / `[ -n "$gem_secret" ]` / `printf … "$gem_id"` 的**展开后参数**
+    #   原样打进 CI 日志。公开仓库的 Actions 日志对所有人可见 —— 实测 2.9.0-4 的构建日志里
+    #   就出现了 `+ '[' -n GOCSPX-… ']'` 这样的明文。这两枚虽是公开凭据，但绝不该出现在日志里
+    #   （会触发 secret scanning 告警，也会让后续维护者误以为仓库泄密）。
+    #   所以：从提取到写盘全程 set +x，只保留下面那句不含值的结论 echo。
+    set +x
     GEM_TMP=$(mktemp -d)
     for gem_pkg in @google/gemini-cli-core @google/gemini-cli @google/antigravity; do
         ( cd "$GEM_TMP" && npm pack "$gem_pkg" --silent >/dev/null 2>&1 ) || continue
@@ -331,19 +338,29 @@ if command -v npm >/dev/null 2>&1; then
             printf 'CMDC_PAK_GOOGLE_CLIENT_ID=%s\nCMDC_PAK_GOOGLE_CLIENT_SECRET=%s\n' \
                 "$gem_id" "$gem_secret" > "$GEMINI_ENV_OUT"
             chmod 600 "$GEMINI_ENV_OUT" 2>/dev/null || true
-            echo "gemini oauth client: extracted from $gem_pkg"
+            GEM_HIT="$gem_pkg"
             break
         fi
     done
     rm -rf "$GEM_TMP"
+    set -x
+    if [ -s "$GEMINI_ENV_OUT" ]; then
+        echo "gemini oauth client: extracted from ${GEM_HIT:-?}"
+    fi
 else
-    echo "WARN: 无 npm，跳过 Gemini 凭据提取（该渠道会提示需自建 OAuth 客户端）"
+    echo "::warning::无 npm，跳过 Gemini 凭据提取（该渠道会提示需自建 OAuth 客户端）"
 fi
 if [ -s "$GEMINI_ENV_OUT" ]; then
     # 只打印形态，不打印值（日志会进 CI 与制品说明）
-    echo "gemini oauth client: packaged (id len=$(grep -c . "$GEMINI_ENV_OUT") fields)"
+    echo "gemini oauth client: packaged ($(grep -c . "$GEMINI_ENV_OUT") fields)"
+    if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+        echo "- Gemini OAuth 客户端凭据：已从公开 npm 包提取并随包分发" >> "$GITHUB_STEP_SUMMARY"
+    fi
 else
-    echo "WARN: 未提取到 Gemini 凭据 —— Gemini 渠道在该包里不可用（其余渠道不受影响）"
+    echo "::warning::未提取到 Gemini 凭据 —— Gemini 渠道在该包里不可用（其余渠道不受影响）"
+    if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+        echo "- ⚠️ Gemini OAuth 客户端凭据：**提取失败**，该渠道在本包内不可用" >> "$GITHUB_STEP_SUMMARY"
+    fi
 fi
 
 # app/ui: 入口配置 + 登录补投页 + 图标（fnpack 要求必须在 app/ui/ 下）
@@ -456,6 +473,92 @@ mkdir -p "$CHECK_DIR"
 tar xzf "$FPK_FILE" -C "$CHECK_DIR"
 tar xzf "$CHECK_DIR/app.tgz" -C "$CHECK_DIR"
 bash "$SCRIPT_DIR/scripts/test-startup-compat.sh" "$CHECK_DIR"
+
+# ---------- 6. 封装层补丁「落地断言」----------
+# 为什么必须从**产物**回读：本脚本所有补丁都是「拿字符串去匹配上游源码」，
+# 上游改一行写法就可能静默失效。失效的后果不是构建失败，而是发出一个
+# 「看起来正常、功能缺失」的包 —— 用户在 NAS 上点按钮才发现
+# （补投页没有入口 / 点登录不跳转 / 手机上整页溢出）。这类问题在 CI 里
+# 只表现为一行 WARN，很容易被忽略，所以这里升级成硬门禁。
+#
+# ★ 判据设计：补投引导允许「两处任一」（index.html 的常驻提示 / app.js 的浮层链接），
+#   上游改其中一边不至于误伤；两边都没了才拦 —— 那说明登录浮层整体重构了，必须人工看。
+assert_marker() { # $1=文件 $2=标记 $3=说明
+    [ -f "$1" ] || { echo "FATAL: 补丁断言失败 [$3]：文件不存在 $1"; exit 1; }
+    grep -qF "$2" "$1" || { echo "FATAL: 补丁断言失败 [$3]：$1 里找不到标记 '$2'"; exit 1; }
+    echo "  ok [ $3 ]"
+}
+assert_absent() { # $1=文件 $2=标记 $3=说明
+    [ -f "$1" ] || return 0
+    if grep -qF "$2" "$1"; then
+        echo "FATAL: 补丁断言失败 [$3]：$1 里仍有 '$2'"
+        exit 1
+    fi
+    echo "  ok [ $3 ]"
+}
+
+echo "--- 封装层补丁落地断言 ---"
+WWBIN="$CHECK_DIR/bin/wild-work"
+assert_marker "$WWBIN" "WW popup patch"        "登录跳转补丁（同步预开窗）"
+assert_marker "$WWBIN" "wwAuthLinkBox"         "浮层内可点授权链接"
+assert_marker "$WWBIN" "wwResumeLogin"         "刷新后恢复登录浮层"
+assert_marker "$WWBIN" "wildwork mobile patch" "手机端 CSS 覆盖"
+# 补投引导：两处任一
+if grep -qF "ww-replay-tip" "$WWBIN" || grep -qF "wwAuthLinkBox" "$WWBIN"; then
+    echo "  ok [ 补投引导（常驻提示或浮层链接，至少一处）]"
+else
+    echo "FATAL: 补丁断言失败 [补投引导]：产物里既没有 ww-replay-tip 也没有 wwAuthLinkBox"
+    exit 1
+fi
+assert_marker "$CHECK_DIR/ui/index.cgi" "is_safe_path"  "补投页结构性校验"
+assert_marker "$CHECK_DIR/ui/index.cgi" "is_safe_query" "补投页查询串校验"
+assert_absent "$CHECK_DIR/ui/config"    "wildwork.direct" "「直连」入口已移除"
+assert_marker "$CHECK_DIR/cmd/main"     "gemini-oauth.env" "Gemini 凭据启动导入"
+
+# ---------- 7. 上游渠道清单（跟随上游的「感知层」）----------
+# 用户的核心诉求是「上游加了新渠道，封装层别掉队」。补投页改成结构性校验后，
+# 本机回调类新渠道**不需要再改封装**；但还有两类情况需要人工知情：
+#   · 需要本机浏览器/客户端才能完成登录的（NAS 上没有 → 该渠道在 NAS 部署下用不了）
+#   · 需要额外资质的（如 Gemini 要 Google OAuth 客户端，已由本脚本自动内置）
+# 这里按「登录形态」给本包里的渠道分档并写进 step summary：零维护、无需快照文件，
+# 上游一变，下次构建的 summary 里自然体现。
+# ⚠️ 判定只用于「提醒」，不做判决：`internal/login` 是基础包（不是渠道），必须排除；
+#    Loomy 这类"本机引导页"与 OAuth 回调一样都在 127.0.0.1 监听，靠注释里出现
+#    redirect_uri 这种信号是分不出来的 —— 所以本机监听型统一成一句话说明，不硬分类。
+echo "--- 上游登录渠道清单（按登录形态分档）---"
+CH_LIST=""
+CH_N_LOOPBACK=0; CH_N_LOCALBROWSER=0; CH_N_SERVER=0
+for d in "$UPSTREAM"/internal/login*/; do
+    [ -d "$d" ] || continue
+    ch=$(basename "$d"); ch=${ch#login_}
+    [ -n "$ch" ] || continue
+    [ "$ch" = "login" ] && continue   # internal/login 是 OAuth 基础包，不是渠道
+    if grep -rqE 'net\.Listen\("tcp", *(fmt\.Sprintf\()?"127\.0\.0\.1' "$d" 2>/dev/null; then
+        kind="本机监听（OAuth 回调走补投页；引导页类需 NAS 本机浏览器）"; CH_N_LOOPBACK=$((CH_N_LOOPBACK+1))
+    elif grep -rqE 'internal/cdp|platform\.OpenURL|Incognito' "$d" 2>/dev/null; then
+        kind="需本机浏览器/客户端（⚠️ NAS 部署下不可用）"; CH_N_LOCALBROWSER=$((CH_N_LOCALBROWSER+1))
+    else
+        kind="服务端轮询/设备码（跨设备可用）"; CH_N_SERVER=$((CH_N_SERVER+1))
+    fi
+    echo "  - $ch : $kind"
+    CH_LIST="${CH_LIST}- \`$ch\` : $kind"$'\n'
+done
+CH_TOTAL=$((CH_N_LOOPBACK + CH_N_LOCALBROWSER + CH_N_SERVER))
+echo "共 $CH_TOTAL 个登录渠道：本机监听 $CH_N_LOOPBACK / 需本机浏览器 $CH_N_LOCALBROWSER / 服务端 $CH_N_SERVER"
+if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+    {
+        echo "### 本包支持的登录渠道（自动扫描上游源码，零维护）"
+        echo ""
+        printf '%s' "$CH_LIST"
+        echo ""
+        echo "- 本机监听 $CH_N_LOOPBACK 个 / 需本机浏览器 $CH_N_LOCALBROWSER 个 / 服务端 $CH_N_SERVER 个"
+        echo ""
+        echo "> 本机回调类渠道在 NAS 部署下经「登录补投」页转交（补投页已做结构性校验，"
+        echo "> 上游新增此类渠道**无需修改封装**）。导入型渠道（MonkeyCode / OfficeAce 等）"
+        echo "> 没有 \`internal/login_*\` 目录，不在上表内。"
+    } >> "$GITHUB_STEP_SUMMARY"
+fi
+
 
 # 供后续 workflow 步骤取用：复制到工作区稳定路径
 if [ -n "$GITHUB_WORKSPACE" ]; then

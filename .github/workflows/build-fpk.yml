@@ -20,7 +20,12 @@ jobs:
   build-fpk:
     runs-on: ubuntu-latest
     concurrency:
-      group: build-fpk-${{ github.ref }}
+      # ★ 按「打包版本」而不是 github.ref 分组（2026-10-18 修）：
+      #   手动 dispatch 的 ref 恒为 refs/heads/main，若按 ref 分组，
+      #   不同版本号（如 force_rebuild 的 -3 与 -4）会落进同一组并被 cancel-in-progress
+      #   互相取消 —— 表现为「刚点的重打把自己掐了，publish 干等到超时」。
+      #   按版本分组后：同版本重复触发仍然取消（幂等），不同版本并行互不干扰。
+      group: build-fpk-${{ github.event.inputs.version || github.ref_name }}
       cancel-in-progress: true
     # ★ 必须显式声明：仓库默认 workflow 权限是 read，
     #   不声明则 softprops/action-gh-release 建 release 会被拒（HTTP 403）。
@@ -42,6 +47,15 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: 'stable'
+
+      # ★ Node/npm 是「Gemini 渠道凭据提取」的依赖（build-fpk.sh 里 npm pack 公开包）。
+      #   不显式 setup 就会依赖 runner 预装的 node —— 版本随 ubuntu-latest 镜像漂移，
+      #   哪天镜像不带 npm 了，这一步会静默降级成「凭据提取失败、Gemini 不可用」，
+      #   而构建仍然成功。显式钉版本，让环境变化以「这里失败」的方式暴露。
+      - name: Set up Node (Gemini 凭据提取需要 npm)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
 
       - name: Install ImageMagick (for icon processing)
         run: |
