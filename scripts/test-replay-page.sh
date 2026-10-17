@@ -56,14 +56,17 @@ check_hit() { # $1=描述 $2=期望路径
     fi
 }
 
-echo "== 1. 各渠道回调路径都能转交 =="
+echo "== 1. 各渠道回调路径都能转交（含上游尚未出现的未来路径）=="
 : > "$HITS"
 for pair in \
     "Trae|/authorize?isRedirect=true&code=a1" \
     "千问办公|/callback?code=a2&state=s" \
     "CodeArts|/oauth/callback?code=a3&state=s" \
     "Gemini|/oauth-callback?code=a4&state=s" \
-    "LobsterAI|/auth/callback?code=a5&state=s" ; do
+    "LobsterAI|/auth/callback?code=a5&state=s" \
+    "未来渠道A|/some/new/channel/callback?code=f1&state=s" \
+    "未来渠道B|/api/oauth/v2/cb?code=f2" \
+    "未来渠道C|/oauth2callback?code=f3&scope=a%20b" ; do
     name="${pair%%|*}"; path="${pair#*|}"
     out=$(submit "http://127.0.0.1:$PORT$path")
     case "$out" in
@@ -73,21 +76,27 @@ for pair in \
     check_hit "$name" "$path"
 done
 
+echo "== 1b. 未来路径（多段/带点号）也必须转发 =="
+: > "$HITS"
+submit "http://127.0.0.1:$PORT/a.b.c/x-y_z/cb?code=g1&x=1" >/dev/null
+check_hit "点号+连字符路径" "/a.b.c/x-y_z/cb?code=g1&x=1"
+
 echo "== 2. localhost 形态（Gemini 用 localhost）=="
 : > "$HITS"
 submit "http://localhost:$PORT/oauth-callback?code=b1&state=s" >/dev/null
 check_hit "localhost" "/oauth-callback?code=b1&state=s"
 
-echo "== 3. 安全边界：外站 / 非法路径 / 低端口 不得转发 =="
+echo "== 3. 安全边界：外站 / 路径穿越 / 低端口 不得转发 =="
 : > "$HITS"
 submit "http://evil.example/oauth/callback?code=x1" >/dev/null
-submit "http://127.0.0.1:$PORT/etc/passwd?code=x2" >/dev/null
+submit "http://127.0.0.1:$PORT/../etc/passwd?code=x2" >/dev/null
 submit "http://127.0.0.1:22/oauth/callback?code=x3" >/dev/null
+submit "http://127.0.0.1:$PORT/ok?code=x4&cmd=;rm -rf /" >/dev/null
 sleep 0.3
 if [ -s "$HITS" ]; then
     echo "  FAIL 有请求被错误转发：$(tr '\n' ' ' < "$HITS")"; FAIL=1
 else
-    echo "  PASS 外站 / 非法路径 / 低端口 均未转发"
+    echo "  PASS 外站 / 路径穿越 / 低端口 / 注入串 均未转发"
 fi
 
 echo "== 4. 表单页可渲染 =="

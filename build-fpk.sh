@@ -157,6 +157,48 @@ else
 fi
 
 (cd "$UPSTREAM" && go mod download && go build -o wild-work -ldflags="-s -w" ./cmd/wild-work)
+
+# ★ Gemini 渠道凭据提取（2026-10-18）：
+#   上游 <internal/gemini/oauthclient.go> 在运行时按「环境变量 → 本机官方 CLI 包」两级
+#   查找 Google OAuth 客户端（client_id / client_secret）。这两个值是官方 CLI 内嵌的
+#   **公开**凭据（任何装了 @google/gemini-cli-core 的人都能提取），但上游**刻意没有**写进
+#   源码 —— 因为 GitHub Secret Scanning Push Protection 只看格式不看是否公开，会直接
+#   拒绝推送（GH013）。而 NAS 上既没有环境变量也没有官方 CLI ⇒ 面板点「＋Gemini」
+#   只会弹窗报「未获取到 Google OAuth 客户端凭据」。
+#   解法：构建期从**公开 npm 包**动态提取，落进包内 bin/gemini-oauth.env（该文件不进 git），
+#   由 template/cmd/main 启动时导入。跟随上游更新，无需人工维护任何硬编码值。
+GEMINI_ENV_OUT="$BUILD_ROOT/app/bin/gemini-oauth.env"
+: > "$GEMINI_ENV_OUT"
+chmod 600 "$GEMINI_ENV_OUT" 2>/dev/null || true
+if command -v npm >/dev/null 2>&1; then
+    GEM_TMP=$(mktemp -d)
+    for gem_pkg in @google/gemini-cli-core @google/gemini-cli @google/antigravity; do
+        ( cd "$GEM_TMP" && npm pack "$gem_pkg" --silent >/dev/null 2>&1 ) || continue
+        gem_tgz=$(ls "$GEM_TMP"/*.tgz 2>/dev/null | head -1)
+        [ -n "$gem_tgz" ] || continue
+        rm -rf "$GEM_TMP/x"; mkdir -p "$GEM_TMP/x"
+        tar xzf "$gem_tgz" -C "$GEM_TMP/x" 2>/dev/null || { rm -f "$gem_tgz"; continue; }
+        gem_id=$(grep -rhoE '[0-9]{10,}-[a-z0-9]{20,}\.apps\.googleusercontent\.com' "$GEM_TMP/x" 2>/dev/null | head -1)
+        gem_secret=$(grep -rhoE 'GOCSPX-[A-Za-z0-9_-]{20,}' "$GEM_TMP/x" 2>/dev/null | head -1)
+        rm -f "$gem_tgz"
+        if [ -n "$gem_id" ] && [ -n "$gem_secret" ]; then
+            printf 'CMDC_PAK_GOOGLE_CLIENT_ID=%s\nCMDC_PAK_GOOGLE_CLIENT_SECRET=%s\n' \
+                "$gem_id" "$gem_secret" > "$GEMINI_ENV_OUT"
+            chmod 600 "$GEMINI_ENV_OUT" 2>/dev/null || true
+            echo "gemini oauth client: extracted from $gem_pkg"
+            break
+        fi
+    done
+    rm -rf "$GEM_TMP"
+else
+    echo "WARN: 无 npm，跳过 Gemini 凭据提取（该渠道会提示需自建 OAuth 客户端）"
+fi
+if [ -s "$GEMINI_ENV_OUT" ]; then
+    # 只打印形态，不打印值（日志会进 CI 与制品说明）
+    echo "gemini oauth client: packaged (id len=$(grep -c . "$GEMINI_ENV_OUT") fields)"
+else
+    echo "WARN: 未提取到 Gemini 凭据 —— Gemini 渠道在该包里不可用（其余渠道不受影响）"
+fi
 # 诊断 + 硬校验：二进制必须在预期位置
 ls -la "$UPSTREAM/wild-work" || { echo "FATAL: binary not at $UPSTREAM/wild-work"; ls -la "$UPSTREAM"; exit 1; }
 BINARY_SHA256=$(sha256sum "$UPSTREAM/wild-work" | cut -d' ' -f1)

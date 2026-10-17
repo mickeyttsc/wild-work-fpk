@@ -337,6 +337,21 @@ case "$1" in
         export WILDWORK_STATE_FILE="$TRIM_PKGVAR/state"
         export WILDWORK_AUTH_DIR="$TRIM_PKGETC/auth"
         export HOME="$TRIM_PKGHOME"
+        # Gemini 渠道的 Google OAuth 客户端凭据：官方 CLI 内嵌的**公开**值。
+        # 上游运行时按「环境变量 → 本机官方 CLI 包」两级查找 <internal/gemini/oauthclient.go>，
+        # 而 NAS 上两者都没有 ⇒ 面板点「＋Gemini」只会弹窗报「未获取到凭据」。
+        # 打包时从公开 npm 包提取并落在 bin/gemini-oauth.env，这里启动前导入。
+        # 文件缺失 = 保持上游原样（错误文案仍可操作），不影响其它渠道启动。
+        GEMINI_ENVF="$TRIM_APPDEST/bin/gemini-oauth.env"
+        if [ -r "$GEMINI_ENVF" ]; then
+            while IFS='=' read -r gk gv; do
+                case "$gk" in
+                    CMDC_PAK_GOOGLE_CLIENT_ID|CMDC_PAK_GOOGLE_CLIENT_SECRET)
+                        [ -n "$gv" ] && export "$gk=$gv"
+                        ;;
+                esac
+            done < "$GEMINI_ENVF"
+        fi
         cd "$TRIM_PKGVAR" || exit 1
         nohup "$APP_BIN" --no-tray >> "$LOG_FILE" 2>&1 &
         echo $! > "$PID_FILE"

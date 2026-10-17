@@ -54,12 +54,26 @@ find_http_client() {
   return 1
 }
 
-# 允许的回调路径白名单（多段路径用 / 分隔；只允许这些，防 SSRF 打内网其它端口）
-is_allowed_cb() {
+# 允许的回调路径校验（**结构性**，不枚举渠道）：
+#   上游新增渠道只改回调路径名（/authorize、/oauth/callback、/oauth-callback…），
+#   枚举白名单意味着「每加一个渠道就要改一次封装层」。这里改为只做安全校验：
+#   路径必须是本机相对路径、不含 .. 穿越、字符集受限。任何新渠道自动成立。
+# ⚠️ 实现用 grep 而不是 case 的字符类：bash 5.2 对 case 模式里含 `&`/`=` 的
+#    方括号表达式会报 syntax error（实测 `*[!…%=&…]*)` 直接语法错），别踩回去。
+is_safe_path() {
   case "$1" in
-    authorize|callback|oauth/callback|oauth-callback|auth/callback|oauth2callback|oauth2/callback) return 0 ;;
-    *) return 1 ;;
+    ''|*..*) return 1 ;;
   esac
+  printf '%s' "$1" | grep -qE '^[A-Za-z0-9._~/-]+$'
+}
+
+# 查询串校验：只拒绝危险字符（空白、引号、$、;、|、<>、反斜杠、#），
+# 其余原样透传 —— 授权码里出现什么字符都可能，不能按白名单卡死。
+is_safe_query() {
+  if printf '%s' "$1" | grep -qE '[[:space:]"`$;|<>\\#]'; then
+    return 1
+  fi
+  return 0
 }
 
 STYLE='body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:#eef6ff;color:#1f2937;display:grid;place-items:center;min-height:92vh;margin:0}main{background:#fff;border-radius:16px;padding:28px;max-width:660px;width:92%;box-shadow:0 4px 24px rgba(0,0,0,.08)}h1{font-size:20px;margin:0 0 12px}p,li{font-size:14px;line-height:1.8}textarea{width:100%;height:96px;box-sizing:border-box;font-size:13px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;word-break:break-all}button{margin-top:12px;background:#2563eb;color:#fff;border:0;border-radius:8px;padding:10px 24px;font-size:15px;cursor:pointer}a{color:#2563eb}.ok{color:#15803d;font-size:16px}.bad{color:#b91c1c;font-size:16px}code{background:#f1f5f9;padding:1px 4px;border-radius:4px}'
@@ -82,14 +96,18 @@ if [ -n "$QUERY" ]; then
     case "$u" in
       http://127.0.0.1:*|http://localhost:*|http://\[::1\]:*)
         rest="${u#http://}"
-        hostport="${rest%%/*}"
-        port="${hostport##*:}"
-        pathq="/${rest#*/}"
-        cb_path="${pathq%%\?*}"
-        cb_path="${cb_path#/}"
-        QUERY=""
-        case "$pathq" in
-          *\?*) QUERY="${pathq#*\?}" ;;
+        case "$rest" in
+          */*)
+            hostport="${rest%%/*}"
+            port="${hostport##*:}"
+            pathq="/${rest#*/}"
+            cb_path="${pathq%%\?*}"
+            cb_path="${cb_path#/}"
+            QUERY=""
+            case "$pathq" in
+              *\?*) QUERY="${pathq#*\?}" ;;
+            esac
+            ;;
         esac
         ;;
     esac
@@ -117,8 +135,8 @@ if [ -n "$bad_port" ]; then
 fi
 
 if [ -n "$port" ] && [ -n "$QUERY" ]; then
-  if ! is_allowed_cb "$cb_path"; then
-    body="<h1>提交结果</h1><p class=\"bad\">网址里的回调路径 <code>/${cb_path}</code> 不在支持范围内，请确认粘贴的是浏览器地址栏里的<b>完整</b>地址。</p><p><a href=\"${BASE}\">← 再补投一条</a></p>"
+  if ! is_safe_path "$cb_path" || ! is_safe_query "$QUERY"; then
+    body="<h1>提交结果</h1><p class=\"bad\">网址里的回调地址不合法（路径 <code>/${cb_path}</code>）。请确认粘贴的是浏览器地址栏里的<b>完整</b>地址。</p><p><a href=\"${BASE}\">← 再补投一条</a></p>"
     send_page "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><title>Wild Work 登录补投</title><style>${STYLE}</style></head><body><main>${body}</main></body></html>"
     exit 0
   fi
@@ -166,13 +184,14 @@ fi
 form_html="<h1>Wild Work 登录补投</h1>"
 form_html="${form_html}<p>在<b>自己的电脑/手机</b>上完成渠道登录后，浏览器会跳到一条 <b>http://127.0.0.1:端口/...</b> 地址并显示打不开——这是正常的：回调落在了你的设备上，而 Wild Work 跑在 NAS 上。把地址栏里的<b>完整地址</b>粘贴到这里，我替你转交给 NAS 端。</p>"
 form_html="${form_html}<ol><li>Wild Work 控制台点『添加账号』，在浏览器里完成登录/授权</li><li>浏览器停在打不开的 <code>127.0.0.1</code> 地址时，复制地址栏<b>完整内容</b></li><li>粘贴到下面，点确认（授权码一般 10 分钟内有效）</li><li>回到 Wild Work 控制台，等 5~10 秒看账号是否出现</li></ol>"
-form_html="${form_html}<p style=\"font-size:13px;opacity:.75\">支持的渠道与回调路径：Trae <code>/authorize</code>、千问办公 <code>/callback</code>、CodeArts <code>/oauth/callback</code>、Gemini <code>/oauth-callback</code>、LobsterAI <code>/auth/callback</code>。<br>（ZCode、MiniMax、Qoder 等走服务端轮询/设备码，不需要补投。）</p>"
+form_html="${form_html}<p style=\"font-size:13px;opacity:.75\">任何 <code>http://127.0.0.1:端口/…</code> 形式的本机回调地址都可以补投（不限于某个渠道——上游以后新增的渠道同样适用）。<br>走服务端轮询/设备码的渠道（如 ZCode、MiniMax、Qoder）不需要补投。</p>"
 form_html="${form_html}<textarea id=\"u\" placeholder=\"http://127.0.0.1:38629/oauth/callback?code=...&amp;state=...\"></textarea>"
 form_html="${form_html}<button onclick=\"go()\">确认提交</button>"
 form_html="${form_html}<script>
 function go(){
   var v=document.getElementById('u').value.trim();
-  var m=v.match(/^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):(\d+)(\/(?:authorize|callback|oauth\/callback|oauth-callback|auth\/callback|oauth2callback|oauth2\/callback)[^\s]*)$/i);
+  // 任何回环回调地址都接受（不枚举渠道）——新增渠道无需改这里。
+  var m=v.match(/^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):(\d+)(\/[^\s]*)?$/i);
   if(!m){alert('请粘贴完整的 http://127.0.0.1:端口/… 回调地址（地址栏整条复制）');return;}
   location.href='__BASE__?u='+encodeURIComponent(v);
 }
