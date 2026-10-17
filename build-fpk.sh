@@ -81,46 +81,19 @@ else
     echo "WARN: 上游没有 $APPJS（前端布局变了？），跳过子路径补丁——装完若网关面板 404 需人工核查"
 fi
 
-# ★ 手机适配补丁（2026-10-09，CDP 393px 仿真实测通过）：
-#   上游已带 3 段 @media (max-width: 640px)，但渠道按钮组是固定 5 列 grid
-#   （.pa-group.pa-right，实测 601px），顶栏双列信息格与 .credit-tip 固定宽
-#   都没进断点 → 手机上整页横向溢出（docScrollW 714 > 393）。追加覆盖块：
-#   按钮 3 列换行、信息格单列可断行、浮层自适应、表格横向滚动。
-#   与 app.js 子路径补丁同机制：改的是上游源码树里的 style.css，go:embed
-#   打进二进制，上游更新时自动跟随（若无此文件则空操作）。
-STYLECSS="$UPSTREAM/cmd/wild-work/web/style.css"
-if [ -f "$STYLECSS" ]; then
-    if ! grep -q 'wildwork mobile patch' "$STYLECSS"; then
-        cat >> "$STYLECSS" <<'MOBILECSS'
-
-/* ==== wildwork mobile patch (2026-10-09) ==== */
-@media (max-width: 640px) {
-  .panel-actions-wrap { flex-wrap: wrap; row-gap: 8px; }
-  .pa-group.pa-right { grid-template-columns: repeat(3, 1fr); width: 100%; }
-  .pa-group.pa-right .btn { width: 100%; min-width: 0; }
-  .top-info { grid-template-columns: 1fr; width: 100%; }
-  .info-value { display: block; max-width: 100%; overflow-wrap: anywhere; word-break: break-all; white-space: normal; }
-  .credit-tip { width: auto !important; max-width: calc(100vw - 20px); }
-  .panel table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
-}
-
-/* ==== wildwork mobile patch v2 (2026-10-09, CDP 393px 实测) ====
-   v1 的 grid 三列覆盖被上游 ".pa-right .btn{justify-self:stretch;white-space:nowrap}"
-   及既有 @media 规则顺序压住不生效；改用 flex 强覆盖：按钮三列等宽换行。 ==== */
-@media (max-width: 640px) {
-  .panel-actions-wrap { flex-wrap: wrap !important; row-gap: 8px; }
-  .pa-group.pa-right { display: flex !important; flex-wrap: wrap !important; gap: 6px !important; width: 100% !important; }
-  .pa-group.pa-right .btn { flex: 1 1 calc(33% - 6px) !important; width: auto !important; min-width: 0 !important;
-    white-space: normal !important; font-size: 12px !important; padding: 8px 6px !important; text-align: center !important; }
-}
-MOBILECSS
-        echo "mobile css patch: appended (@media 640px override v1+v2)"
-    else
-        echo "mobile css patch: already present, skip"
-    fi
-else
-    echo "WARN: 上游没有 $STYLECSS（前端布局变了？），跳过手机适配补丁"
-fi
+# ★★ 手机适配补丁已退役（2026-10-18，实测判定）
+#   上游 v2.9.0 已系统性重做移动端：style.css 里有 12 段 @media（700/640/779/679/719/899/479
+#   + hover:none pointer:coarse），并针对顶栏、接口信息、账号卡片、费率表、运行统计、
+#   用量流水、触控目标七类问题逐条注释了实测数据（和当年我们踩的是同一批坑）。
+#   渠道按钮改用 `.pa-right { grid-template-columns: repeat(auto-fit, minmax(118px,1fr)) }`
+#   自适应列数，比我们硬钉三列更合理。
+#   CDP 三视口实测（官方原版 vs 我们带补丁版）：
+#     393px  官方 2列/按钮高35 统一   |  补丁版 3列/按钮高 52+35 混排（文字换行，视觉参差）
+#     480px  官方 3列                 |  补丁版 3列
+#     600px  官方 4列（自适应）        |  补丁版 3列（退化，按钮被拉宽到 173px）
+#     三个断点官方溢出均为 0 —— 当年打补丁的目标（docScrollW 714 > 393）上游已自行达标。
+#   结论：这段补丁从「修复」变成了「带 !important 的排版倒退」，直接删除，
+#   移动端交回上游维护（上游每次改版都会自带最新适配，我们不需要跟）。
 
 # ★ 补投页引导补丁（2026-10-18）：
 #   上游 2.6+ 陆续新增「本机回环回调」渠道（CodeArts /oauth/callback、Gemini /oauth-callback、
@@ -502,7 +475,8 @@ WWBIN="$CHECK_DIR/bin/wild-work"
 assert_marker "$WWBIN" "WW popup patch"        "登录跳转补丁（同步预开窗）"
 assert_marker "$WWBIN" "wwAuthLinkBox"         "浮层内可点授权链接"
 assert_marker "$WWBIN" "wwResumeLogin"         "刷新后恢复登录浮层"
-assert_marker "$WWBIN" "wildwork mobile patch" "手机端 CSS 覆盖"
+# ⚠️ 不要再断言 "wildwork mobile patch"：该补丁已于 2026-10-18 退役（上游自带 12 段断点适配，
+#    实测 393/480/600 三档均 0 溢出且布局更优）。若哪天有人把它加回来，这里也不该再护着。
 # 补投引导：两处任一
 if grep -qF "ww-replay-tip" "$WWBIN" || grep -qF "wwAuthLinkBox" "$WWBIN"; then
     echo "  ok [ 补投引导（常驻提示或浮层链接，至少一处）]"
