@@ -249,6 +249,49 @@ else
     echo "WARN: 上游没有 $APPJS2，跳过登录跳转补丁"
 fi
 
+# ★ Gemini OAuth scope 收敛补丁（2026-10-18，修「错误 403：restricted_client」）：
+#   上游 Scopes 抄了 6 项（openid / cloud-platform / userinfo.email / userinfo.profile /
+#   cclog / experimentsandconfigs），但**这两枚凭据来自 Google 官方 Gemini CLI 的公开
+#   client_id**，Google 只为它注册了 3 项。多要的 `cclog`（Cloud Code 内部日志通道）和
+#   `experimentsandconfigs` 属受限 scope，授权页直接回：
+#       错误 403：restricted_client
+#       Unregistered scope(s) in the request: https://www.googleapis.com/auth/cclog
+#   实测依据（本机解包 @google/gemini-cli-core@0.64.0 的 dist/src/code_assist/oauth2.js:55）：
+#       const OAUTH_SCOPE = ['…/auth/cloud-platform', '…/auth/userinfo.email', '…/auth/userinfo.profile'];
+#   ⇒ 官方 CLI 只用 3 项就能跑通全部功能，故这里把 Scopes 收敛到官方这 3 项。
+#   补丁锚点失效（上游重写了常量）时 WARN 不失败，由 compat-audit 的产物断言兜底。
+GEMCONST="$UPSTREAM/internal/gemini/constants.go"
+if [ -f "$GEMCONST" ]; then
+    python3 - "$GEMCONST" <<'PYGEM'
+import re, sys
+p = sys.argv[1]
+s = open(p, encoding='utf-8').read()
+if 'ww-scope-patch' in s:
+    print('gemini scope patch: already present, skip'); sys.exit(0)
+# 匹配 var Scopes = []string{ ... } 整块
+m = re.search(r'var Scopes = \[\]string\{(.*?)\n\}', s, re.S)
+if not m:
+    print('WARN: 未找到 var Scopes 定义，跳过 Gemini scope 收敛（Gemini 授权会 403）')
+    sys.exit(0)
+new = ('var Scopes = []string{\n'
+       '\t// ww-scope-patch (2026-10-18): 仅保留 Google 官方 Gemini CLI 注册的 3 项。\n'
+       '\t// 上游原本多要 cclog / experimentsandconfigs / openid，而本 client_id 未注册\n'
+       '\t// 前两者 ⇒ 授权页 403 restricted_client。官方 CLI 用这 3 项即可完整工作。\n'
+       '\tScopeCloudPlatform,\n'
+       '\tScopeUserInfoEmail,\n'
+       '\tScopeUserInfoProfile,\n'
+       '}')
+s2 = s[:m.start()] + new + s[m.end():]
+open(p, 'w', encoding='utf-8').write(s2)
+print('gemini scope patch: 已收敛为 3 项（去 cclog / experimentsandconfigs / openid）')
+PYGEM
+    if ! grep -q 'ww-scope-patch' "$GEMCONST"; then
+        echo "::warning::Gemini scope 补丁未落地 —— 该渠道授权会 403 restricted_client"
+    fi
+else
+    echo "WARN: 上游没有 internal/gemini/constants.go，跳过 Gemini scope 收敛"
+fi
+
 (cd "$UPSTREAM" && go mod download && go build -o wild-work -ldflags="-s -w" ./cmd/wild-work)
 
 # 诊断 + 硬校验：二进制必须在预期位置

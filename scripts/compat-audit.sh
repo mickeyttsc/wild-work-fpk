@@ -171,6 +171,16 @@ if [ -s "$ROOT/bin/wild-work" ]; then
                    || bad "二进制里仍有 $n 处根相对 \"/api/（网关下面板会 404）"
     grep -qF "WW popup patch" "$ROOT/bin/wild-work" && ok "登录跳转补丁在位" || bad "登录跳转补丁缺失"
     grep -qF "wwResumeLogin" "$ROOT/bin/wild-work" && ok "刷新后恢复登录浮层在位" || bad "恢复浮层补丁缺失"
+    # Gemini scope 收敛：不得再出现受限的 cclog / experimentsandconfigs
+    # （这两项该 client_id 未注册，授权页会 403 restricted_client）
+    if grep -qF "auth/cclog" "$ROOT/bin/wild-work"; then
+        bad "二进制里仍请求受限 scope cclog（Gemini 授权会 403 restricted_client）"
+    else
+        ok "未请求受限 scope cclog（Gemini 授权可用）"
+    fi
+    grep -qF "auth/experimentsandconfigs" "$ROOT/bin/wild-work" \
+        && bad "二进制里仍请求受限 scope experimentsandconfigs" \
+        || ok "未请求受限 scope experimentsandconfigs"
     # 手机适配交回上游：不应再有我们的 !important 覆盖
     grep -qF "wildwork mobile patch" "$ROOT/bin/wild-work" \
         && bad "仍带着已退役的手机端 !important 覆盖（会压制上游自适应布局）" \
