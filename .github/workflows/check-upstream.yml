@@ -65,11 +65,33 @@ jobs:
               https://api.github.com/repos/rockswang/wild-work/releases/latest)
             tag=$(echo "$resp" | jq -r '.tag_name')
             url=$(echo "$resp" | jq -r '.html_url')
+            # ★ 显式断言「只跟正式版」（2026-10-18，用户明确要求）：
+            #   /releases/latest 按 GitHub 定义为「最新非 draft、非 prerelease 的 release」，
+            #   但这是外部 API 的契约，一旦行为漂移或返回异常体，就可能把预发布版当正式版跟随。
+            #   这里自己再判一次，不依赖对端语义：
+            #     · tag 必须存在且非字面量 "null"（API 出错时 jq 会返回 null）
+            #     · prerelease / draft 必须都是 false
+            #   任一不满足就整轮跳过（不构建、不发布），等下个周期再看。
+            pre=$(echo "$resp" | jq -r '.prerelease // empty')
+            drf=$(echo "$resp" | jq -r '.draft // empty')
+            case "${tag:-}" in
+              ""|"null")
+                echo "::warning::上游 latest 返回异常（tag=${tag:-空}），本轮跳过"
+                echo "skip=true" >> "$GITHUB_OUTPUT"
+                exit 0 ;;
+            esac
+            if [ "$pre" = "true" ] || [ "$drf" = "true" ]; then
+              echo "::warning::上游 latest 竟是预发布/draft（$tag prerelease=$pre draft=$drf），按规则跳过"
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "上游 latest 为正式版：$tag（prerelease=$pre draft=$drf）"
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "Upstream: $tag ($url)"
 
       - name: Decide whether to build (and which package revision)
+        if: steps.upstream.outputs.skip != 'true'
         id: check
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -100,6 +122,7 @@ jobs:
           fi
 
       - name: Record dispatch time
+        if: steps.upstream.outputs.skip != 'true'
         id: t0
         if: steps.check.outputs.build == 'true'
         run: |
@@ -109,6 +132,7 @@ jobs:
           echo "epoch=$(( $(date +%s) - 120 ))" >> "$GITHUB_OUTPUT"
 
       - name: Trigger build workflow
+        if: steps.upstream.outputs.skip != 'true'
         if: steps.check.outputs.build == 'true'
         run: |
           set -euo pipefail
@@ -125,6 +149,7 @@ jobs:
           echo "Build dispatched: upstream ${{ steps.upstream.outputs.tag }} -> v${{ steps.check.outputs.package_version }}"
 
       - name: Publish release
+        if: steps.upstream.outputs.skip != 'true'
         id: publish
         if: steps.check.outputs.build == 'true'
         env:
@@ -136,6 +161,7 @@ jobs:
             --since "${{ steps.t0.outputs.epoch }}"
 
       - name: Repair - ensure release carries the asset
+        if: steps.upstream.outputs.skip != 'true'
         # 即使 check 步骤认为「已发布」，也回读一次是否真带可用附件。
         # 空 Release（只有壳没有附件）是历史 bug，这一步让它自愈。
         # 主路径刚跑过就不重复触发（重复 dispatch 会被 concurrency 互相取消）。
