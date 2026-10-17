@@ -122,9 +122,8 @@ jobs:
           fi
 
       - name: Record dispatch time
-        if: steps.upstream.outputs.skip != 'true'
         id: t0
-        if: steps.check.outputs.build == 'true'
+        if: steps.upstream.outputs.skip != 'true' && steps.check.outputs.build == 'true'
         run: |
           # 减 120s 容差：runner 与 GitHub 的时间戳可能有偏差。
           # publish-release.sh 按「该时刻之后最新的一次 build run」定位，
@@ -132,8 +131,7 @@ jobs:
           echo "epoch=$(( $(date +%s) - 120 ))" >> "$GITHUB_OUTPUT"
 
       - name: Trigger build workflow
-        if: steps.upstream.outputs.skip != 'true'
-        if: steps.check.outputs.build == 'true'
+        if: steps.upstream.outputs.skip != 'true' && steps.check.outputs.build == 'true'
         run: |
           set -euo pipefail
           code=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
@@ -149,9 +147,8 @@ jobs:
           echo "Build dispatched: upstream ${{ steps.upstream.outputs.tag }} -> v${{ steps.check.outputs.package_version }}"
 
       - name: Publish release
-        if: steps.upstream.outputs.skip != 'true'
         id: publish
-        if: steps.check.outputs.build == 'true'
+        if: steps.upstream.outputs.skip != 'true' && steps.check.outputs.build == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -161,11 +158,10 @@ jobs:
             --since "${{ steps.t0.outputs.epoch }}"
 
       - name: Repair - ensure release carries the asset
-        if: steps.upstream.outputs.skip != 'true'
         # 即使 check 步骤认为「已发布」，也回读一次是否真带可用附件。
         # 空 Release（只有壳没有附件）是历史 bug，这一步让它自愈。
         # 主路径刚跑过就不重复触发（重复 dispatch 会被 concurrency 互相取消）。
-        if: always() && (steps.check.outputs.build != 'true' || steps.publish.outcome == 'failure')
+        if: steps.upstream.outputs.skip != 'true' && always() && (steps.check.outputs.build != 'true' || steps.publish.outcome == 'failure')
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
