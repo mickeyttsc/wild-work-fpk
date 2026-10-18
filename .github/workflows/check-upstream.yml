@@ -18,7 +18,11 @@ name: Check Upstream & Auto-Build
 
 on:
   schedule:
-    - cron: '0 */2 * * *'   # 每 2 小时
+    # ⚠️ 别改回整点 `0 */2 * * *`。实测（123 次 schedule run）：声明 12 次/天，
+    #    实际只有 3~6 次，平均间隔 5.63h、最长 11.1h，开始时间比整点槽位晚 0~110 分钟。
+    #    GitHub Actions 的定时触发在高负载时会丢班/延迟，整点 minute 0 是拥堵最严重的位置。
+    #    错开到 17 分可缓解拥堵；但要「上游发版后一两小时内出包」仍需本机侧探测兜底。
+    - cron: '17 */2 * * *'   # 每 2 小时，避开整点拥堵
   workflow_dispatch:        # 支持手动立即检查
     inputs:
       upstream_tag:
