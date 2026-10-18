@@ -137,29 +137,31 @@ fi
 #     B. 登录浮层里常驻一条可点击的授权链接（手机端/被拦时的兜底）；
 #     C. 刷新页面后若后端仍有 login_busy，恢复浮层并给出「取消」入口
 #        （否则流程卡在内存里，用户既看不到浮层也点不到取消，只能干等 6 分钟超时）。
-#   锚点找不到一律 WARN 不失败（上游重构不阻塞出包），落地与否在下面硬校验。
+#   锚点策略（2026-10-18 修正）：**不再用固定字符串锚定 startLogin 开头**。
+#   上游 2.9.1 在函数头与 try 之间插了注释块和 `if (channel === "officeace")` 分派，
+#   固定锚点必然断，进而 FATAL 卡死自动跟随。改为按 AST 找函数体 → 在「取登录链接的
+#   await 所在的 try」之前插入预开窗前置，函数内部替换按语义串匹配。
+#   A 段（startLogin）打不上且上游也没原生修复 → FATAL 拒绝出包；
+#   startOfficeAceWebLogin（2.9.1 新增的同类入口）打不上 → 只 WARN，不阻塞出包。
 APPJS2="$UPSTREAM/cmd/wild-work/web/app.js"
 if [ -f "$APPJS2" ]; then
     # set -e 下 python 非零会直接终止脚本，导致下面的诊断分支永远进不去，
     # 所以这里显式关闭 errexit 拿到退出码再判定。
     set +e
     python3 - "$APPJS2" <<'PYAPPJS'
-import re
-import sys
+
+import re, sys
 p = sys.argv[1]
 s = open(p, encoding='utf-8').read()
 if 'WW popup patch' in s:
     print('login popup patch: already present, skip')
     sys.exit(0)
 
-anchor_a = 'async function startLogin(channel, accountLabel) {\n  try {\n    const r = await api("/api/login/start"'
-anchor_a = anchor_a.replace('/api/', 'api/')  # 子路径补丁已把 /api/ 改成 api/
-prelude = '''async function startLogin(channel, accountLabel) {
-  // ★ WW popup patch (2026-10-18)：window.open 必须在 await 之前**同步**调用。
-  //   await 之后调用已脱离用户手势栈，浏览器弹窗拦截器会直接吞掉 ——
-  //   现象就是「点了登录没有任何反应」（浮层起来了，但没有新标签页）。
+PRELUDE = '''  // \u2605 WW popup patch\uff1awindow.open \u5fc5\u987b\u5728 await \u4e4b\u524d**\u540c\u6b65**\u8c03\u7528\u3002
+  //   await \u4e4b\u540e\u8c03\u7528\u5df2\u8131\u79bb\u7528\u6237\u624b\u52bf\u6808\uff0c\u6d4f\u89c8\u5668\u5f39\u7a97\u62e6\u622a\u5668\u4f1a\u76f4\u63a5\u541e\u6389 \u2014\u2014
+  //   \u73b0\u8c61\u5c31\u662f\u300c\u70b9\u4e86\u767b\u5f55\u6ca1\u6709\u4efb\u4f55\u53cd\u5e94\u300d\uff08\u6d6e\u5c42\u8d77\u6765\u4e86\uff0c\u4f46\u6ca1\u6709\u65b0\u6807\u7b7e\u9875\uff09\u3002
   let wwWin = null;
-  let wwUsed = false; // 预开的空白窗是否已被用于跳转（决定最后要不要清掉）
+  let wwUsed = false; // \u9884\u5f00\u7684\u7a7a\u767d\u7a97\u662f\u5426\u5df2\u88ab\u7528\u4e8e\u8df3\u8f6c\uff08\u51b3\u5b9a\u6700\u540e\u8981\u4e0d\u8981\u6e05\u6389\uff09
   try { wwWin = window.open("", "_blank"); } catch (e) { wwWin = null; }
   const wwClosePre = () => { try { if (wwWin && !wwWin.closed) wwWin.close(); } catch (e) {} };
   const wwOpen = (u) => {
@@ -168,87 +170,129 @@ prelude = '''async function startLogin(channel, accountLabel) {
     }
     try { return !!window.open(u, "_blank"); } catch (e) { return false; }
   };
-  try {
-    const r = await api("/api/login/start"'''
-prelude = prelude.replace('/api/', 'api/')
+'''
 
-ok_a = False
+def find_func_span(s, name):
+    m = re.search(r'(?:async\s+)?function\s+' + re.escape(name) + r'\s*\([^)]*\)\s*\{', s)
+    if not m:
+        return None
+    i = m.end() - 1
+    depth = 0
+    for j in range(i, min(len(s), i + 30000)):
+        if s[j] == '{':
+            depth += 1
+        elif s[j] == '}':
+            depth -= 1
+            if depth == 0:
+                return (i, j + 1)
+    return None
 
-# ★ 先判断上游是否**已原生修复**弹窗时序（window.open 写在 await 之前）。
-#   为什么要这层判断：上游一旦自己修好，我们的锚点就可能匹配不上，而旧逻辑会
-#   直接 FATAL —— 结果是「上游越修越坏，我们的自动跟随永久卡住」。
-#   实测：上游真的重写过 startLogin，这类情况必须能自动识别并放行。
-native_fixed = False
-_fn = re.search(r'async function startLogin\s*\([^)]*\)\s*\{', s)
-if _fn:
-    _i = _fn.end() - 1
-    _depth = 0
-    _body = ''
-    for _j in range(_i, min(len(s), _i + 12000)):
-        if s[_j] == '{':
-            _depth += 1
-        elif s[_j] == '}':
-            _depth -= 1
-            if _depth == 0:
-                _body = s[_i:_j + 1]
-                break
-    _w = _body.find('await api(')
-    _o = _body.find('window.open(url')
-    if _w > 0 and _o > 0 and _o < _w:
-        native_fixed = True
+def insert_prelude(body, call_marker):
+    i_api = body.find(call_marker)
+    if i_api < 0:
+        return None, 'call marker not found'
+    i_try = body.rfind('try {', 0, i_api)
+    if i_try < 0:
+        return None, 'try { not found before call'
+    ls = body.rfind('\n', 0, i_try) + 1
+    if body[ls:i_try].strip():
+        return None, 'try { not at line start'
+    return body[:ls] + PRELUDE + body[ls:], None
 
-if anchor_a in s:
-    s = s.replace(anchor_a, prelude, 1)
+def patch_func(s, name, call_marker, extras):
+    span = find_func_span(s, name)
+    if not span:
+        return s, 'function not found'
+    a, b = span
+    body = s[a:b]
+    if 'wwWin' in body:
+        return s, 'already patched'
+    nb, err = insert_prelude(body, call_marker)
+    if err:
+        return s, err
+    for old, new in extras:
+        if old not in nb:
+            return s, 'extra anchor not found: %r' % old[:70]
+        nb = nb.replace(old, new)
+    return s[:a] + nb + s[b:], None
+
+TOAST_BLOCK = 'if (!wwOpen(url)) toast("\u6d4f\u89c8\u5668\u62e6\u622a\u4e86\u5f39\u7a97\uff0c\u8bf7\u70b9\u300c\u590d\u5236\u94fe\u63a5\u300d\u624b\u52a8\u6253\u5f00", 6000);'
+BOX = ('    // \u2605 WW popup patch\uff1a\u6d6e\u5c42\u91cc\u7ed9\u51fa\u53ef\u70b9\u51fb\u94fe\u63a5\uff08\u624b\u673a\u7aef window.open \u5e38\u88ab\u62e6\uff0c\u8fd9\u662f\u6700\u7a33\u7684\u515c\u5e95\uff09\n'
+       '    (function (u) {\n'
+       '      let box = document.getElementById("wwAuthLinkBox");\n'
+       '      if (!box) {\n'
+       '        const ov = $("loginOverlay");\n'
+       '        const body = ov ? ov.querySelector(".modal-body") : null;\n'
+       '        if (!body) return;\n'
+       '        box = document.createElement("div");\n'
+       '        box.id = "wwAuthLinkBox";\n'
+       '        box.style.cssText = "margin-top:10px;font-size:13px;word-break:break-all";\n'
+       '        body.appendChild(box);\n'
+       '      }\n'
+       '      box.innerHTML = \'<a href="\' + String(u).replace(/"/g, "&quot;") + \'" target="_blank" rel="noopener" style="color:#2563eb;text-decoration:underline">\u82e5\u6ca1\u6709\u81ea\u52a8\u6253\u5f00\uff0c\u70b9\u6b64\u6253\u5f00\u6388\u6743\u9875</a>\';\n'
+       '    })(url);')
+startlogin_extras = [
+    ('if (!url) { toast("\u65e0\u6cd5\u83b7\u53d6\u767b\u5f55\u94fe\u63a5"); return; }',
+     'if (!url) { wwClosePre(); toast("\u65e0\u6cd5\u83b7\u53d6\u767b\u5f55\u94fe\u63a5"); return; }'),
+    ('window.open(url, "_blank", "noopener,noreferrer");', TOAST_BLOCK),
+    ('    $("loginOverlay").classList.remove("hidden");\n    $("btnCopyUrl").dataset.url = url;',
+     '    if (!wwUsed) wwClosePre(); // \u6ca1\u7528\u5230\u9884\u5f00\u7a97\uff08\u540e\u7aef\u5df2\u81ea\u5df1\u5f00\u7a97 / \u8d70 CDP \u6355\u83b7\uff09\u5c31\u6e05\u6389\uff0c\u522b\u7559\u7a7a\u767d\u6807\u7b7e\u9875\n'
+     '    $("loginOverlay").classList.remove("hidden");\n'
+     '    $("btnCopyUrl").dataset.url = url;\n' + BOX),
+]
+s, err_a = patch_func(s, 'startLogin', 'const r = await api("api/login/start"', startlogin_extras)
+
+if err_a == 'already patched':
     ok_a = True
-    # 不打开浏览器的分支要关掉预开的空白窗；要打开的分支改走 wwOpen
-    s = s.replace(
-        '    if (!url) { toast("无法获取登录链接"); return; }',
-        '    if (!url) { wwClosePre(); toast("无法获取登录链接"); return; }', 1)
-    s = s.replace(
-        '      window.open(url, "_blank", "noopener,noreferrer");',
-        '      if (!wwOpen(url)) toast("浏览器拦截了弹窗，请点「复制链接」手动打开", 6000);', 1)
-    s = s.replace(
-        '      $("loginMsg").textContent = "请在浏览器新窗口中完成登录…";\n      window.open(url, "_blank", "noopener,noreferrer");',
-        '      $("loginMsg").textContent = "请在浏览器新窗口中完成登录…";\n'
-        '      if (!wwOpen(url)) toast("浏览器拦截了弹窗，请点「复制链接」手动打开", 6000);', 1)
-    # backend_opened / hasWebLogin / loomy 之外的分支：后端没开窗时清掉空白窗
-    s = s.replace(
-        '    $("loginOverlay").classList.remove("hidden");\n    $("btnCopyUrl").dataset.url = url;',
-        '    if (!wwUsed) wwClosePre(); // 没用到预开窗（后端已自己开窗 / 走 CDP 捕获）就清掉，别留空白标签页\n'
-        '    $("loginOverlay").classList.remove("hidden");\n'
-        '    $("btnCopyUrl").dataset.url = url;\n'
-        '    // ★ WW popup patch：浮层里给出可点击链接（手机端 window.open 常被拦，这是最稳的兜底）\n'
-        '    (function (u) {\n'
-        '      let box = document.getElementById("wwAuthLinkBox");\n'
-        '      if (!box) {\n'
-        '        const ov = $("loginOverlay");\n'
-        '        const body = ov ? ov.querySelector(".modal-body") : null;\n'
-        '        if (!body) return;\n'
-        '        box = document.createElement("div");\n'
-        '        box.id = "wwAuthLinkBox";\n'
-        '        box.style.cssText = "margin-top:10px;font-size:13px;word-break:break-all";\n'
-        '        body.appendChild(box);\n'
-        '      }\n'
-        '      box.innerHTML = \'<a href="\' + String(u).replace(/"/g, "&quot;") + \'" target="_blank" rel="noopener" style="color:#2563eb;text-decoration:underline">若没有自动打开，点此打开授权页</a>\';\n'
-        '    })(url);', 1)
-elif native_fixed:
-    # 上游自己把 window.open 提到 await 之前了：A 段（预开窗 + 兜底链接）整体跳过。
-    # 注意：此时是**真的没有**兜底链接 —— 不假装注入（上游重构后变量名未知，
-    # 硬插会引入未定义变量的风险）。只加 native 标记，让下游断言知道"该段不需要"。
-    print('login popup patch: 上游已原生修复弹窗时序，A 段整体跳过（仅保留恢复浮层 C 段）')
-    s = s.rstrip() + '\n// ww-native-ok: 上游已原生修复弹窗时序（window.open 在 await 之前）\n'
+elif err_a:
+    native_fixed = False
+    span = find_func_span(s, 'startLogin')
+    if span:
+        body = s[span[0]:span[1]]
+        _w = body.find('await api(')
+        _o = body.find('window.open(url')
+        if _w > 0 and _o > 0 and _o < _w:
+            native_fixed = True
+    if native_fixed:
+        print('login popup patch: \u4e0a\u6e38\u5df2\u539f\u751f\u4fee\u590d\u5f39\u7a97\u65f6\u5e8f\uff0cA \u6bb5\u6574\u4f53\u8df3\u8fc7\uff08\u4ec5\u4fdd\u7559\u6062\u590d\u6d6e\u5c42 C \u6bb5\uff09')
+        s = s.rstrip() + '\n// ww-native-ok: \u4e0a\u6e38\u5df2\u539f\u751f\u4fee\u590d\u5f39\u7a97\u65f6\u5e8f\uff08window.open \u5728 await \u4e4b\u524d\uff09\n'
+        ok_a = False
+    else:
+        print('FATAL: startLogin \u8865\u4e01\u951a\u70b9\u5931\u6548\u4e14\u4e0a\u6e38\u672a\u539f\u751f\u4fee\u590d \u2014\u2014 \u539f\u56e0\uff1a%s' % err_a)
+        print('\u5f53\u524d startLogin \u5f00\u5934\uff1a')
+        span = find_func_span(s, 'startLogin')
+        print(s[span[0]:span[0] + 900] if span else '(\u627e\u4e0d\u5230 startLogin \u51fd\u6570)')
+        sys.exit(2)
 else:
-    print('FATAL: startLogin 锚点失效且上游未原生修复 —— 上游重构了前端登录流程，'
-          '需要人工更新 build-fpk.sh 里的 anchor_a。下面是当前 startLogin 的开头，供对照：')
-    _m = re.search(r'async function startLogin[^\n]*\n(?:.*\n){0,8}', s)
-    print(_m.group(0) if _m else '(找不到 startLogin 函数)')
-    sys.exit(2)
+    ok_a = True
 
-# C：刷新页面后恢复登录浮层（否则卡在 login_busy 里无从取消）
+oa_old = ('    const w = window.open(url, "_blank");\n'
+          '    if (w) {\n'
+          '      try { w.opener = null; } catch (e) { /* \u8de8\u57df\u65f6\u53ef\u80fd\u88ab\u62d2\uff0c\u5ffd\u7565 */ }\n'
+          '    } else {\n'
+          '      toast("\u6d4f\u89c8\u5668\u62e6\u622a\u4e86\u5f39\u7a97\uff0c\u8bf7\u70b9\u300c\u590d\u5236\u94fe\u63a5\u300d\u624b\u52a8\u6253\u5f00", 6000);\n'
+          '    }')
+oa_new = ('    if (!wwOpen(url)) {\n'
+          '      toast("\u6d4f\u89c8\u5668\u62e6\u622a\u4e86\u5f39\u7a97\uff0c\u8bf7\u70b9\u300c\u590d\u5236\u94fe\u63a5\u300d\u624b\u52a8\u6253\u5f00", 6000);\n'
+          '    }\n'
+          '    if (!wwUsed) wwClosePre(); // \u7528\u7684\u662f\u5907\u7528\u7a97\uff0c\u628a\u9884\u5f00\u7684\u7a7a\u767d\u7a97\u6e05\u6389')
+oa_extras = [
+    ('if (!url) { toast("\u65e0\u6cd5\u83b7\u53d6\u767b\u5f55\u94fe\u63a5"); return; }',
+     'if (!url) { wwClosePre(); toast("\u65e0\u6cd5\u83b7\u53d6\u767b\u5f55\u94fe\u63a5"); return; }'),
+    (oa_old, oa_new),
+]
+s_oa, err_oa = patch_func(s, 'startOfficeAceWebLogin', 'const r = await api("api/login/officeace_auto"', oa_extras)
+if err_oa and err_oa != 'already patched':
+    print('WARN: startOfficeAceWebLogin \u672a\u6253\u8865\u4e01\uff08%s\uff09\u2014\u2014 \u4e0d\u963b\u585e\u51fa\u5305' % err_oa)
+else:
+    s = s_oa
+    if err_oa != 'already patched':
+        print('login popup patch: officeace \u5165\u53e3\u540c\u6b65\u9884\u5f00\u7a97\u5df2\u6253')
+
 tail = '''
-// ★ WW popup patch：进入面板时若后端仍有登录流程在跑（典型场景：刷新过页面），
-// 把浮层恢复出来并给出取消入口 —— 否则流程锁在内存里，用户既看不到浮层也点不到取消，
-// 只能干等 app.pollLogin 的 5~6 分钟超时，期间点任何渠道都会被「已有登录流程进行中」拒绝。
+// \u2605 WW popup patch\uff1a\u8fdb\u5165\u9762\u677f\u65f6\u82e5\u540e\u7aef\u4ecd\u6709\u767b\u5f55\u6d41\u7a0b\u5728\u8dd1\uff08\u5178\u578b\u573a\u666f\uff1a\u5237\u65b0\u8fc7\u9875\u9762\uff09\uff0c
+// \u628a\u6d6e\u5c42\u6062\u590d\u51fa\u6765\u5e76\u7ed9\u51fa\u53d6\u6d88\u5165\u53e3 \u2014\u2014 \u5426\u5219\u6d41\u7a0b\u9501\u5728\u5185\u5b58\u91cc\uff0c\u7528\u6237\u65e2\u770b\u4e0d\u5230\u6d6e\u5c42\u4e5f\u70b9\u4e0d\u5230\u53d6\u6d88\uff0c
+// \u53ea\u80fd\u5e72\u7b49 app.pollLogin \u7684 5~6 \u5206\u949f\u8d85\u65f6\uff0c\u671f\u95f4\u70b9\u4efb\u4f55\u6e20\u9053\u90fd\u4f1a\u88ab\u300c\u5df2\u6709\u767b\u5f55\u6d41\u7a0b\u8fdb\u884c\u4e2d\u300d\u62d2\u7edd\u3002
 setTimeout(function () {
   try {
     if (!state || !state.login_busy) return;
@@ -258,18 +302,18 @@ setTimeout(function () {
     if (!ov) return;
     const msg = document.getElementById("loginMsg");
     const title = document.getElementById("loginTitle");
-    if (title) title.textContent = "登录进行中";
+    if (title) title.textContent = "\u767b\u5f55\u8fdb\u884c\u4e2d";
     if (msg) {
-      msg.innerHTML = "上一次登录流程还没结束（可能是刷新页面导致的）。"
-        + "若已放弃，请点「取消」释放；否则继续在浏览器里完成授权。"
-        + \'<div id="wwResumeLogin" style="margin-top:10px">\'
-        + \'<a href="#" onclick="cancelLogin();return false;" style="color:#b91c1c">释放这次登录流程</a></div>\';
+      msg.innerHTML = "\u4e0a\u4e00\u6b21\u767b\u5f55\u6d41\u7a0b\u8fd8\u6ca1\u7ed3\u675f\uff08\u53ef\u80fd\u662f\u5237\u65b0\u9875\u9762\u5bfc\u81f4\u7684\uff09\u3002"
+        + "\u82e5\u5df2\u653e\u5f03\uff0c\u8bf7\u70b9\u300c\u53d6\u6d88\u300d\u91ca\u653e\uff1b\u5426\u5219\u7ee7\u7eed\u5728\u6d4f\u89c8\u5668\u91cc\u5b8c\u6210\u6388\u6743\u3002"
+        + '<div id="wwResumeLogin" style="margin-top:10px">'
+        + '<a href="#" onclick="cancelLogin();return false;" style="color:#b91c1c">\u91ca\u653e\u8fd9\u6b21\u767b\u5f55\u6d41\u7a0b</a></div>';
     }
     ov.classList.remove("hidden");
-  } catch (e) { /* 静默：这是辅助提示，绝不能影响面板主流程 */ }
+  } catch (e) { /* \u9759\u9ed8\uff1a\u8fd9\u662f\u8f85\u52a9\u63d0\u793a\uff0c\u7edd\u4e0d\u80fd\u5f71\u54cd\u9762\u677f\u4e3b\u6d41\u7a0b */ }
 }, 1500);
 '''
-if 'WW popup patch：进入面板时' not in s:
+if 'WW popup patch\uff1a\u8fdb\u5165\u9762\u677f\u65f6' not in s:
     s = s.rstrip() + '\n' + tail
     ok_c = True
 else:
@@ -283,7 +327,7 @@ PYAPPJS
     if [ "$appjs_rc" -ne 0 ]; then
         # python 段自己已经打印了 FATAL 原因与当前 startLogin 的样貌
         echo "FATAL: 登录跳转补丁无法落地（exit=$appjs_rc）。上游重构了前端登录流程，"
-        echo "       需人工更新 build-fpk.sh 里的 anchor_a / prelude 锚点后再出包。"
+        echo "       需人工检查 build-fpk.sh 里登录补丁的匹配串（startLogin 内语义锚点）后再出包。"
         echo "       本次**不会**发出缺功能的包。"
         exit 1
     fi
