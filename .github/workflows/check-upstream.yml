@@ -18,11 +18,31 @@ name: Check Upstream & Auto-Build
 
 on:
   schedule:
-    # ⚠️ 别改回整点 `0 */2 * * *`。实测（123 次 schedule run）：声明 12 次/天，
-    #    实际只有 3~6 次，平均间隔 5.63h、最长 11.1h，开始时间比整点槽位晚 0~110 分钟。
-    #    GitHub Actions 的定时触发在高负载时会丢班/延迟，整点 minute 0 是拥堵最严重的位置。
-    #    错开到 17 分可缓解拥堵；但要「上游发版后一两小时内出包」仍需本机侧探测兜底。
-    - cron: '17 */2 * * *'   # 每 2 小时，避开整点拥堵
+    # ⚠️ 改前必读（GitHub 官方三条硬约束，都已实测命中）：
+    #   1. 「The shortest interval you can run scheduled workflows is once every 5 minutes.」
+    #      —— 5 分钟是下限，没有更快的原生办法。
+    #   2. 「The schedule event can be delayed during periods of high loads… High load times
+    #      include the start of every hour. If the load is sufficiently high enough, some
+    #      queued jobs may be dropped. To decrease the chance of delay, schedule your workflow
+    #      to run at a different time of the hour.」
+    #      —— 这是丢班的官方定性：不是流水线坏，是 GitHub 主动丢。实测本仓 123 次 schedule
+    #      run 每天只跑 3~6 次、最长空窗 11.1h；错开到 17 分后仍丢一半（8 班只跑 4 班）。
+    #   3. 「In a public repository, scheduled workflows are automatically disabled when no
+    #      repository activity has occurred in 60 days.」
+    #      —— 60 天没推送就整个停摆，且只有 Actions 页面能看出来。长期不动仓要记得回来看。
+    #
+    # 对策：不再靠「少而准」，改成「多而密」——单次 run 只有几秒，靠高频把丢班的空窗压短。
+    #   每 10 分钟一次（144 次/天），且刻意避开 minute 0（官方点名的整点拥堵位）。
+    #   即使按实测 50% 丢班率，最坏空窗也只有 ~20 分钟，而不是 11 小时。
+    #   公开仓 Actions 分钟数免费，这个频率没有成本问题。
+    # 一个 workflow 可以写多条 cron（官方文档明确支持），这里拆成 6 条而不是 `*/10`，
+    # 就是为了不踩 minute 0/30 这两个高负载位。
+    - cron: '5 * * * *'
+    - cron: '15 * * * *'
+    - cron: '25 * * * *'
+    - cron: '35 * * * *'
+    - cron: '45 * * * *'
+    - cron: '55 * * * *'
   workflow_dispatch:        # 支持手动立即检查
     inputs:
       upstream_tag:
