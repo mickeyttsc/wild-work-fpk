@@ -1,0 +1,14 @@
+name: Schedule Probe (temporary)
+
+# 临时探针：只为回答一个问题 —— 本仓的 schedule 触发当前还活着吗？
+# 10 分钟后无论结果如何都应删除此文件。
+on:
+  schedule:
+    - cron: '5,15,25,35,45,55 * * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "schedule probe fired at $(date -u '+%F %T') UTC"
