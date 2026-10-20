@@ -15,7 +15,7 @@
 //	HTTPS 入口（fnos.net / 反代域名）是安全上下文、浏览器原生带
 //	Sec-Fetch-Site: same-origin，所以一直正常。
 //
-// 修复（透传层两条，不碰请求体/响应体；回调补投继续走 ui/index.cgi 既有机制）：
+// 修复（透传层两条，不碰请求体/响应体；登录补投由上游面板自带的粘贴框承担，本桥只保证其 POST 能过 CSRF）：
 //  1. Host 对齐：入口 Host 无端口而 Origin 有端口且 host 名一致时，把端口
 //     补回转发 Host（$host 丢端口的直接补救）。
 //  2. 同源注入：Origin 的 host 名与入口 Host 的 host 名一致、且 UA 是浏览器、

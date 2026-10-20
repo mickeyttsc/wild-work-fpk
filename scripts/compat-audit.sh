@@ -65,8 +65,11 @@ for k,v in urls.items():
 print("  \033[32mPASS\033[0m 入口 JSON 合法、主入口字段齐全")
 PY
     grep -q "wildwork.direct" "$UIC" && bad "仍存在已废弃的「直连」入口 wildwork.direct" || ok "无废弃的直连入口"
+    # 补投页入口已于 2026-10-20 退役（上游 v2.9.3 自带面板内粘贴兜底），
+    # 桌面必须回到「只有一个图标」——多一个图标就是退役没做干净。
+    grep -q "wildwork.submit" "$UIC" && bad "仍存在已退役的「登录补投」入口 wildwork.submit" || ok "无已退役的补投页入口"
     n=$(python3 -c "import json;print(len(json.load(open('$UIC'))['.url']))" 2>/dev/null || echo 0)
-    [ "$n" -ge 2 ] && ok "入口数量 = $n（主入口 + 补投页）" || bad "入口数量异常：$n"
+    [ "$n" -eq 1 ] && ok "入口数量 = 1（仅主入口）" || bad "入口数量异常：$n（期望 1，补投页已退役）"
 else
     bad "ui/config 不存在"
 fi
@@ -109,21 +112,24 @@ else
     bad "cmd/main 缺失"
 fi
 
-# ── 5. 登录补投页 ───────────────────────────────────────────────────────────
-echo "[5] 登录补投页 ui/index.cgi"
-CGI="$ROOT/ui/index.cgi"
-if [ -f "$CGI" ]; then
-    bash -n "$CGI" 2>/dev/null && ok "index.cgi 语法正确" || bad "index.cgi 语法错误"
-    [ -x "$CGI" ] && ok "index.cgi 可执行" || bad "index.cgi 缺少可执行位"
-    for marker in is_safe_path is_safe_query "?u="; do
-        grep -qF "$marker" "$CGI" && ok "index.cgi 含 $marker" || bad "index.cgi 缺少 $marker"
-    done
-    # 结构性校验：不得再出现按渠道枚举的白名单
-    grep -qE 'authorize\|callback\|oauth/callback' "$CGI" \
-        && bad "index.cgi 疑似退回渠道路径白名单（应做结构性校验）" \
-        || ok "index.cgi 未使用渠道枚举白名单"
+# ── 5. 登录补投（封装页已退役，改守护上游自带能力）─────────────────────────
+echo "[5] 登录补投（上游自带粘贴兜底）"
+# 2026-10-20 起：封装层 ui/index.cgi 与 desktop 入口 wildwork.submit 已退役，
+# 登录兜底完全交给上游面板（POST /api/login/callback + manualCallbackKind 五渠道白名单，
+# 前端 lcCallbackRow 粘贴框，v2.9.3 R104 起自带）。
+# 这里守护两件事：①上游那条链路还在（否则用户又回到「面板干等超时」死局）；
+# ②我们那套没有悄悄复活（两套补投 UI 并存会让用户不知道信哪个）。
+if [ -f "$ROOT/bin/wild-work" ]; then
+    grep -qF "lcCallbackRow" "$ROOT/bin/wild-work" \
+        && ok "上游自带补投在位（lcCallbackRow）" \
+        || bad "上游自带补投丢失：二进制里找不到 lcCallbackRow，用户将无法完成本机回环回调类渠道的登录"
 else
-    bad "ui/index.cgi 缺失"
+    skip "缺 bin/wild-work，无法检查上游补投能力"
+fi
+if [ -f "$ROOT/ui/index.cgi" ]; then
+    bad "已退役的封装补投页 ui/index.cgi 又出现了"
+else
+    ok "封装补投页未打入包"
 fi
 
 # ── 6. 图标 ─────────────────────────────────────────────────────────────────

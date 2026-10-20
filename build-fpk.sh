@@ -95,39 +95,13 @@ fi
 #   结论：这段补丁从「修复」变成了「带 !important 的排版倒退」，直接删除，
 #   移动端交回上游维护（上游每次改版都会自带最新适配，我们不需要跟）。
 
-# ★ 补投页引导补丁（2026-10-18）：
-#   上游 2.6+ 陆续新增「本机回环回调」渠道（CodeArts /oauth/callback、Gemini /oauth-callback、
-#   LobsterAI /auth/callback、千问 /callback）。wild-work 跑在 NAS 上、浏览器在用户设备上，
-#   授权完成后浏览器必然跳到用户自己的 127.0.0.1:随机端口 并显示打不开，面板只能干等到超时。
-#   封装层的 template/ui/index.cgi 负责把这条地址转交回 NAS（补投），但用户不知道有这一页。
-#   这里在「等待登录」浮层里常驻一行说明 + 入口链接（锚点唯一，上游改版找不到就跳过）。
-INDEXHTML="$UPSTREAM/cmd/wild-work/web/index.html"
-if [ -f "$INDEXHTML" ]; then
-    python3 - "$INDEXHTML" <<'PYPATCH'
-import sys
-p = sys.argv[1]
-s = open(p, encoding='utf-8').read()
-if 'ww-replay-tip' in s:
-    print('replay tip patch: already present, skip')
-    sys.exit(0)
-anchor = '      <div class="login-buttons">'
-tip = ('      <div id="wwReplayTip" class="ww-replay-tip" style="margin-top:10px;font-size:12.5px;'
-       'line-height:1.7;color:#92400e;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;'
-       'padding:8px 10px">登录后若浏览器跳到一条 <b>127.0.0.1</b> 地址并显示打不开，属正常'
-       '（回调落在你自己的设备上）。把地址栏整条复制到 '
-       '<a href="/cgi/ThirdParty/wildwork/index.cgi/" target="_blank" rel="noopener" '
-       'style="color:#b45309;text-decoration:underline">登录补投</a> 页提交，NAS 端才会收到授权码。'
-       'ZCode / MiniMax / Qoder 走服务端轮询，不需要补投。</div>\n')
-if anchor in s:
-    s = s.replace(anchor, tip + anchor, 1)
-    open(p, 'w', encoding='utf-8').write(s)
-    print('replay tip patch: injected')
-else:
-    print('WARN: 未找到 login-buttons 锚点，跳过补投提示注入（不影响功能）')
-PYPATCH
-else
-    echo "WARN: 上游没有 $INDEXHTML，跳过补投提示注入"
-fi
+# ★ 封装层补投引导 —— 已于 2026-10-20 退役，不要恢复：
+#   上游 v2.9.3（R104）把「粘贴回调地址」做进**面板登录弹窗自身**：后端 POST /api/login/callback
+#   + manualCallbackKind 五渠道白名单（CodeArts/LobsterAI/TraeWork/QwenWork/Gemini），前端按
+#   /api/login/start 返回的 manual_callback 显隐 lcCallbackRow 粘贴框。它就地提交、不依赖 fnOS 会话、
+#   还带端口一致性校验（粘上一次登录的地址会被 400 明确指出），全面优于封装层 ui/index.cgi 那页。
+#   两套补投 UI 并存时用户不知道信哪个 —— 所以整段删除，登录兜底交回上游维护。
+#   守护断言见下方「上游自带补投」段（既断言它在，也断言我们那套没被加回来）。
 
 # ★ 登录跳转补丁（2026-10-18，对应「点登录没有任何反应」）：
 #   上游 startLogin() 是 async，window.open 写在 `await api(...)` **之后** —— 此时已脱离
@@ -483,10 +457,9 @@ else
     fi
 fi
 
-# app/ui: 入口配置 + 登录补投页 + 图标（fnpack 要求必须在 app/ui/ 下）
+# app/ui: 入口配置 + 图标（fnpack 要求必须在 app/ui/ 下）
+# ⚠️ 不再拷贝 index.cgi：封装层补投页已于 2026-10-20 退役（上游自带粘贴兜底，见上方说明）。
 cp "$TPL/ui/config" "$BUILD_ROOT/app/ui/config"
-cp "$TPL/ui/index.cgi" "$BUILD_ROOT/app/ui/index.cgi"
-chmod +x "$BUILD_ROOT/app/ui/index.cgi"
 
 # ★ 图标用上游官方图标（黑底 + 荧光绿笔刷 "W"），不要用 template 里的占位图。
 #   上游 icon.png 与 build/appicon.png 内容完全相同（同为 858x858），指向
@@ -546,7 +519,7 @@ printf 'ctl_stop              = true\r\n' >> "$M"
 printf 'service_port          = 7863\r\n' >> "$M"
 printf 'desktop_uidir         = ui\r\n' >> "$M"
 printf 'desktop_applaunchname = wildwork.main\r\n' >> "$M"
-printf 'changelog             = 自封装版：上游主程序升级到官方 %s（sha256 %s）；fnOS 封装版本 %s。\r\n' "$UPSTREAM_REF" "$BINARY_SHA256" "$PKG_VERSION" >> "$M"
+printf 'changelog             = 自封装版：上游主程序升级到官方 %s（sha256 %s）；fnOS 封装版本 %s。登录回调补投改由面板登录弹窗内置的「粘贴回调地址」框承担（v2.9.3 起上游自带），独立的「登录补投」页与桌面图标已移除。\r\n' "$UPSTREAM_REF" "$BINARY_SHA256" "$PKG_VERSION" >> "$M"
 
 echo "--- BUILD_ROOT 内容 ---"
 find "$BUILD_ROOT" -type f | sort
@@ -631,15 +604,24 @@ assert_marker "$WWBIN" "wwAuthLinkBox"         "浮层内可点授权链接"
 assert_marker "$WWBIN" "wwResumeLogin"         "刷新后恢复登录浮层"
 # ⚠️ 不要再断言 "wildwork mobile patch"：该补丁已于 2026-10-18 退役（上游自带 12 段断点适配，
 #    实测 393/480/600 三档均 0 溢出且布局更优）。若哪天有人把它加回来，这里也不该再护着。
-# 补投引导：两处任一
-if grep -qF "ww-replay-tip" "$WWBIN" || grep -qF "wwAuthLinkBox" "$WWBIN"; then
-    echo "  ok [ 补投引导（常驻提示或浮层链接，至少一处）]"
+# 补投能力：判据从「我们的补投页」改成「守护上游自带的粘贴兜底」（v2.9.3 R104）。
+# 标记取前端 DOM id lcCallbackRow —— app.js 与 index.html 都随 go:embed 打进二进制，
+# 上游一旦重构掉这条链路，用户就回到「浏览器停在 127.0.0.1 打不开、面板干等超时」的死局，
+# 那必须人工介入，所以是硬门禁而非 WARN。
+if grep -qF "lcCallbackRow" "$WWBIN"; then
+    echo "  ok [ 上游自带补投（lcCallbackRow 粘贴回调地址）]"
 else
-    echo "FATAL: 补丁断言失败 [补投引导]：产物里既没有 ww-replay-tip 也没有 wwAuthLinkBox"
+    echo "FATAL: 上游自带补投丢失（二进制里找不到 lcCallbackRow）—— 上游重构了登录弹窗，需人工确认"
     exit 1
 fi
-assert_marker "$CHECK_DIR/ui/index.cgi" "is_safe_path"  "补投页结构性校验"
-assert_marker "$CHECK_DIR/ui/index.cgi" "is_safe_query" "补投页查询串校验"
+# 反向守护：封装层补投页已退役，谁把两套补投 UI 加回来就让构建失败。
+assert_absent "$WWBIN" "ww-replay-tip" "封装补投引导已退役"
+if [ -e "$CHECK_DIR/ui/index.cgi" ]; then
+    echo "FATAL: 封装补投页 ui/index.cgi 又出现在包里（已于 2026-10-20 退役）"
+    exit 1
+fi
+echo "  ok [ 封装补投页未打入包 ]"
+assert_absent "$CHECK_DIR/ui/config" "wildwork.submit" "补投页桌面入口已移除"
 assert_absent "$CHECK_DIR/ui/config"    "wildwork.direct" "「直连」入口已移除"
 assert_marker "$CHECK_DIR/cmd/main"     "gemini-oauth.env" "Gemini 凭据启动导入"
 
@@ -662,7 +644,7 @@ for d in "$UPSTREAM"/internal/login*/; do
     [ -n "$ch" ] || continue
     [ "$ch" = "login" ] && continue   # internal/login 是 OAuth 基础包，不是渠道
     if grep -rqE 'net\.Listen\("tcp", *(fmt\.Sprintf\()?"127\.0\.0\.1' "$d" 2>/dev/null; then
-        kind="本机监听（OAuth 回调走补投页；引导页类需 NAS 本机浏览器）"; CH_N_LOOPBACK=$((CH_N_LOOPBACK+1))
+        kind="本机监听（OAuth 回调走面板内粘贴兜底；引导页类需 NAS 本机浏览器）"; CH_N_LOOPBACK=$((CH_N_LOOPBACK+1))
     elif grep -rqE 'internal/cdp|platform\.OpenURL|Incognito' "$d" 2>/dev/null; then
         kind="需本机浏览器/客户端（⚠️ NAS 部署下不可用）"; CH_N_LOCALBROWSER=$((CH_N_LOCALBROWSER+1))
     else
@@ -681,8 +663,8 @@ if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
         echo ""
         echo "- 本机监听 $CH_N_LOOPBACK 个 / 需本机浏览器 $CH_N_LOCALBROWSER 个 / 服务端 $CH_N_SERVER 个"
         echo ""
-        echo "> 本机回调类渠道在 NAS 部署下经「登录补投」页转交（补投页已做结构性校验，"
-        echo "> 上游新增此类渠道**无需修改封装**）。导入型渠道（MonkeyCode / OfficeAce 等）"
+        echo "> 本机回调类渠道在 NAS 部署下经**面板登录弹窗内的「粘贴回调地址」**兜底转交"
+        echo "> （上游 manualCallbackKind 白名单，v2.9.3 起自带；封装层补投页已退役）。导入型渠道（MonkeyCode / OfficeAce 等）"
         echo "> 没有 \`internal/login_*\` 目录，不在上表内。"
     } >> "$GITHUB_STEP_SUMMARY"
 fi
