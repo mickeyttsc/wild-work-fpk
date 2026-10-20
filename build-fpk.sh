@@ -480,8 +480,13 @@ if ! command -v convert &>/dev/null; then
     echo "FATAL: 缺少 ImageMagick 的 convert，无法生成 64/256 图标"
     exit 1
 fi
-convert "$UPSTREAM_ICON" -resize 64x64 "$BUILD_ROOT/app/ui/images/icon_64.png"
-convert "$UPSTREAM_ICON" -resize 256x256 "$BUILD_ROOT/app/ui/images/icon_256.png"
+# ⚠️ -define png:exclude-chunk=time 不能省：ImageMagick 默认往 PNG 写 tIME（生成时刻），
+#    于是同一源码两次构建的图标字节必然不同 —— 实测两个包像素数据（IDAT）完全一致，
+#    只有 tIME 差 25 分钟，却导致 manifest checksum 与整包 sha256 都变。
+#    后果：CI artifact 与 Release 附件对不上，更新器会把本地同版本包判成「内容与 Release 不一致」。
+#    用 exclude-chunk 而不是 -strip：只去掉时间戳，保留 cHRM/pHYs 等色彩信息。
+convert "$UPSTREAM_ICON" -resize 64x64 -define png:exclude-chunk=time "$BUILD_ROOT/app/ui/images/icon_64.png"
+convert "$UPSTREAM_ICON" -resize 256x256 -define png:exclude-chunk=time "$BUILD_ROOT/app/ui/images/icon_256.png"
 
 # cmd/: 生命周期脚本（照搬真机模板）
 for f in main install_init install_callback upgrade_init upgrade_callback \
